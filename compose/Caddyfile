@@ -1,0 +1,4 @@
+{$DOMAIN_N8N} {
+  encode gzip
+  reverse_proxy n8n:5678
+}

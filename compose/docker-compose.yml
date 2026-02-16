@@ -1,0 +1,80 @@
+networks:
+  public:
+  private:
+    internal: true
+
+services:
+  postgres:
+    image: postgres:15
+    restart: unless-stopped
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_DB=${POSTGRES_DB}
+      - TZ=${TZ}
+    volumes:
+      - /opt/automatizacion_crm/volumes/postgres:/var/lib/postgresql/data
+    networks:
+      - private
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  n8n:
+    image: docker.n8n.io/n8nio/n8n:stable
+    restart: unless-stopped
+    environment:
+      - NODE_ENV=production
+      - GENERIC_TIMEZONE=${TZ}
+
+      - N8N_HOST=${DOMAIN_N8N}
+      - N8N_PROTOCOL=https
+      - N8N_PORT=5678
+      - N8N_EDITOR_BASE_URL=https://${DOMAIN_N8N}
+      - WEBHOOK_URL=https://${DOMAIN_N8N}
+
+      - N8N_ENCRYPTION_KEY=${N8N_ENCRYPTION_KEY}
+      - N8N_SECURE_COOKIE=true
+
+      - DB_TYPE=postgresdb
+      - DB_POSTGRESDB_HOST=postgres
+      - DB_POSTGRESDB_PORT=5432
+      - DB_POSTGRESDB_DATABASE=${POSTGRES_DB}
+      - DB_POSTGRESDB_USER=${POSTGRES_USER}
+      - DB_POSTGRESDB_PASSWORD=${POSTGRES_PASSWORD}
+
+      - N8N_PROXY_HOPS=1
+      - N8N_TRUST_PROXY=true
+
+    volumes:
+      - /opt/automatizacion_crm/volumes/n8n:/home/node/.n8n
+      - /opt/automatizacion_crm/files:/data
+      - /opt/automatizacion_crm/apps:/apps
+      - /opt/automatizacion_crm/logs:/logs
+    networks:
+      - public
+      - private
+    expose:
+      - "5678"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      - DOMAIN_N8N=${DOMAIN_N8N}
+    volumes:
+      - /opt/automatizacion_crm/compose/Caddyfile:/etc/caddy/Caddyfile:ro
+      - /opt/automatizacion_crm/volumes/caddy_data:/data
+      - /opt/automatizacion_crm/volumes/caddy_config:/config
+    networks:
+      - public
+    depends_on:
+      - n8n

@@ -1,0 +1,6 @@
+secrets/
+volumes/
+*.sql
+*.tar.gz
+.env
+system_backups/

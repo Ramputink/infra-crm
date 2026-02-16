@@ -1,6 +1,10 @@
+.env
 secrets/
 volumes/
+n8n_data/
+postgres_data/
+system_backups/
+*.log
 *.sql
 *.tar.gz
-.env
-system_backups/
+node_modules/

@@ -6,5 +6,6 @@ postgres_data/
 system_backups/
 *.log
 *.sql
+!migrate_enterprise.sql
 *.tar.gz
 node_modules/

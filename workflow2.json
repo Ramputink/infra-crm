@@ -23,7 +23,7 @@
     },
     {
       "parameters": {
-        "jsCode": "// Generate a unique worker ID for this execution\nconst workerId = `wf2_${$execution.id.substring(0, 12)}_${Date.now()}`;\nreturn [{ json: { worker_id: workerId } }];"
+        "jsCode": "const workerId = `wf2_${$execution.id.substring(0, 12)}_${Date.now()}`;\nreturn [{ json: { worker_id: workerId } }];"
       },
       "id": "node-gen-id",
       "name": "Generate Worker ID",
@@ -34,7 +34,7 @@
     {
       "parameters": {
         "operation": "executeQuery",
-        "query": "INSERT INTO worker_locks(lock_key, owner_id, heartbeat_at)\nVALUES ('cold_email_worker', $1, NOW())\nON CONFLICT (lock_key) DO UPDATE\nSET owner_id = EXCLUDED.owner_id,\n    heartbeat_at = NOW()\nWHERE worker_locks.heartbeat_at < NOW() - INTERVAL '2 minutes'\nRETURNING lock_key, owner_id, heartbeat_at;",
+        "query": "INSERT INTO worker_locks(lock_key, owner_id, heartbeat_at)\nVALUES ('cold_email_worker', $1, NOW())\nON CONFLICT (lock_key) DO UPDATE\nSET owner_id = EXCLUDED.owner_id,\n    heartbeat_at = NOW(),\n    updated_at = NOW()\nWHERE worker_locks.heartbeat_at < NOW() - INTERVAL '2 minutes'\nRETURNING lock_key, owner_id, heartbeat_at;",
         "options": {
           "queryParameterValues": {
             "values": [
@@ -85,11 +85,11 @@
     {
       "parameters": {
         "operation": "executeQuery",
-        "query": "-- Reap stale processing jobs (visibility timeout 10 min)\nUPDATE email_queue\nSET status = 'queued',\n    locked_by = NULL,\n    locked_at = NULL,\n    updated_at = NOW()\nWHERE status = 'processing'\n  AND locked_at < NOW() - INTERVAL '10 minutes'\nRETURNING id;\n",
+        "query": "UPDATE leads\nSET email_status = 'queued',\n    updated_at = NOW()\nWHERE email_status = 'sending'\n  AND updated_at < NOW() - INTERVAL '10 minutes'\nRETURNING id;",
         "options": {}
       },
       "id": "node-reaper",
-      "name": "Reap Stale Jobs",
+      "name": "Reap Stale Leads",
       "type": "n8n-nodes-base.postgres",
       "typeVersion": 2.5,
       "position": [760, 300],
@@ -100,11 +100,15 @@
     {
       "parameters": {
         "operation": "executeQuery",
-        "query": "SELECT next_allowed_at,\n       GREATEST(0, EXTRACT(EPOCH FROM (next_allowed_at - NOW()))) AS wait_seconds\nFROM rate_limits\nWHERE key = 'sendgrid_global';",
-        "options": {}
+        "query": "WITH next_lead AS (\n  SELECT id\n  FROM leads\n  WHERE email_status = 'queued'\n    AND email_valid = true\n    AND active = true\n    AND last_email_sent_at IS NULL\n    AND unsubscribed_at IS NULL\n  ORDER BY created_at ASC\n  LIMIT 1\n  FOR UPDATE SKIP LOCKED\n)\nUPDATE leads l\nSET email_status = 'sending',\n    updated_at = NOW()\nFROM next_lead\nWHERE l.id = next_lead.id\nRETURNING l.id, l.email, l.full_name, l.first_name, l.last_name,\n          l.category, l.language, l.country, l.campus,\n          l.tipo_producto, l.titling, l.facultad, l.phone;",
+        "options": {
+          "queryParameterValues": {
+            "values": []
+          }
+        }
       },
-      "id": "node-ratelimit-check",
-      "name": "Check Rate Limit",
+      "id": "node-pick-lead",
+      "name": "Pick 1 Lead",
       "type": "n8n-nodes-base.postgres",
       "typeVersion": 2.5,
       "position": [1000, 300],
@@ -118,63 +122,8 @@
           "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict" },
           "conditions": [
             {
-              "id": "cond-rate",
-              "leftValue": "={{ $json.wait_seconds }}",
-              "rightValue": "1",
-              "operator": { "type": "number", "operation": "gt" }
-            }
-          ],
-          "combinator": "and"
-        },
-        "options": {}
-      },
-      "id": "node-if-rate",
-      "name": "IF Must Wait",
-      "type": "n8n-nodes-base.if",
-      "typeVersion": 2,
-      "position": [1240, 300]
-    },
-    {
-      "parameters": {
-        "amount": "={{ Math.min(Math.ceil($('Check Rate Limit').item.json.wait_seconds), 120) }}",
-        "unit": "seconds"
-      },
-      "id": "node-rate-wait",
-      "name": "Wait for Rate Limit",
-      "type": "n8n-nodes-base.wait",
-      "typeVersion": 1.1,
-      "position": [1480, 200],
-      "webhookId": "rate-wait-001"
-    },
-    {
-      "parameters": {
-        "operation": "executeQuery",
-        "query": "WITH picked AS (\n  SELECT eq.id\n  FROM email_queue eq\n  JOIN leads l ON l.id = eq.lead_id\n  WHERE eq.status = 'queued'\n    AND eq.next_attempt_at <= NOW()\n    AND l.email_valid = true\n    AND l.unsubscribed_at IS NULL\n    AND l.suppressed_reason IS NULL\n  ORDER BY eq.priority ASC, eq.created_at ASC\n  LIMIT 1\n  FOR UPDATE OF eq SKIP LOCKED\n)\nUPDATE email_queue q\nSET status = 'processing',\n    locked_by = $1,\n    locked_at = NOW(),\n    updated_at = NOW()\nFROM picked\nWHERE q.id = picked.id\nRETURNING q.id AS queue_id, q.lead_id, q.campaign_type,\n          q.attempt_count, q.max_attempts;",
-        "options": {
-          "queryParameterValues": {
-            "values": [
-              { "name": "$1", "value": "={{ $('Generate Worker ID').item.json.worker_id }}" }
-            ]
-          }
-        }
-      },
-      "id": "node-pick-job",
-      "name": "Pick 1 Job from Queue",
-      "type": "n8n-nodes-base.postgres",
-      "typeVersion": 2.5,
-      "position": [1720, 300],
-      "credentials": {
-        "postgres": { "id": "", "name": "CRM Database" }
-      }
-    },
-    {
-      "parameters": {
-        "conditions": {
-          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict" },
-          "conditions": [
-            {
-              "id": "cond-job",
-              "leftValue": "={{ $json.queue_id }}",
+              "id": "cond-lead",
+              "leftValue": "={{ $json.id }}",
               "rightValue": "",
               "operator": { "type": "string", "operation": "isNotEmpty" }
             }
@@ -183,11 +132,11 @@
         },
         "options": {}
       },
-      "id": "node-if-job",
-      "name": "IF Job Found",
+      "id": "node-if-lead",
+      "name": "IF Lead Found",
       "type": "n8n-nodes-base.if",
       "typeVersion": 2,
-      "position": [1960, 300]
+      "position": [1240, 300]
     },
     {
       "parameters": {
@@ -201,50 +150,29 @@
           }
         }
       },
-      "id": "node-release-lock",
-      "name": "Release Lock and FIN",
+      "id": "node-release-nolead",
+      "name": "Release Lock (no leads)",
       "type": "n8n-nodes-base.postgres",
       "typeVersion": 2.5,
-      "position": [2200, 500],
+      "position": [1480, 500],
       "credentials": {
         "postgres": { "id": "", "name": "CRM Database" }
       }
     },
     {
       "parameters": {
-        "operation": "executeQuery",
-        "query": "SELECT l.id, l.email, l.full_name, l.first_name, l.last_name,\n       l.category, l.language, l.country, l.campus,\n       l.tipo_producto, l.titling, l.facultad, l.phone\nFROM leads l\nWHERE l.id = $1;",
-        "options": {
-          "queryParameterValues": {
-            "values": [
-              { "name": "$1", "value": "={{ $json.lead_id }}" }
-            ]
-          }
-        }
-      },
-      "id": "node-fetch-lead",
-      "name": "Fetch Lead Data",
-      "type": "n8n-nodes-base.postgres",
-      "typeVersion": 2.5,
-      "position": [2200, 200],
-      "credentials": {
-        "postgres": { "id": "", "name": "CRM Database" }
-      }
-    },
-    {
-      "parameters": {
-        "jsCode": "const lead = $('Fetch Lead Data').item.json;\nconst job = $('Pick 1 Job from Queue').item.json;\n\nconst supportedLangs = ['Español', 'Francés', 'Inglés', 'Italiano'];\nconst lang = supportedLangs.includes(lead.language) ? lead.language : 'Inglés';\nconst firstName = lead.first_name || lead.full_name || 'Student';\nconst titling = (lead.titling || lead.tipo_producto || 'tu programa')\n  .replace(/^-\\s*/, '').replace(/\\s*-$/, '').replace(/\\.\\s*$/, '').trim();\n\nconst idempotencyKey = `cold_email:${lead.id}`;\n\nconst templates = {\n  'Español': {\n    subject: `Siguiente paso: Homologación de tus estudios para ${titling}`,\n    greeting: `Hola ${firstName},`,\n    body: `<p style=\"margin:0 0 12px 0;font-size:16px;line-height:1.6\"><strong>¡Felicidades</strong> por tu admisión al programa de <strong>${titling}</strong> en la Universidad Europea! 🎉 Sabemos lo importante que es para ti dar este paso y queremos que tu inicio sea lo más fácil posible.</p><p style=\"margin:0 0 12px 0;font-size:16px;line-height:1.6\">Para comenzar, necesitarás realizar la <strong>homologación de tus estudios previos</strong>. Es un requisito indispensable, pero no tienes por qué preocuparte: en <em>Space for Edu</em> nos encargamos de guiarte y simplificar todo el proceso.</p><p style=\"margin:16px 0 8px 0;font-size:16px;line-height:1.6\"><strong>Estamos aquí para que:</strong></p><ul style=\"margin:0 0 12px 22px;padding:0;font-size:16px;line-height:1.6\"><li style=\"margin:0 0 6px 0\">No pierdas tiempo con trámites confusos.</li><li style=\"margin:0 0 6px 0\">Tengas la tranquilidad de que tu documentación esté en regla.</li><li style=\"margin:0 0 6px 0\">Te enfoques en lo que realmente importa: tus estudios y tu futuro.</li></ul><p style=\"margin:12px 0 12px 0;font-size:16px;line-height:1.6\">¿Prefieres que te contactemos por <strong>WhatsApp</strong> o por <strong>teléfono</strong>? También nos puedes escribir al <a href=\"tel:+34635527594\" style=\"color:#0b69ff;text-decoration:none\">+34 635 52 75 94</a> o a <a href=\"mailto:center@spaceforedu.com\" style=\"color:#0b69ff;text-decoration:none\">center@spaceforedu.com</a>.</p><p style=\"margin:12px 0 12px 0;font-size:16px;line-height:1.6\">Visita nuestra web: <a href=\"https://spaceforedu.com/es/space-edu-espanol/\" style=\"color:#0b69ff;text-decoration:none\">spaceforedu.com</a></p><p style=\"margin:0 0 16px 0;font-size:16px;line-height:1.6\">Con mucho gusto te acompañaremos en este paso importante.</p><p style=\"margin:0 0 2px 0;font-size:16px;line-height:1.6\">Quedo pendiente,</p><p style=\"margin:0 0 18px 0;font-size:16px;line-height:1.6\">Saludos,</p>`,\n    disclaimer: `De conformidad con la Ley Orgánica 3/2018 y el Reglamento (UE) 2016/679, los datos personales serán tratados por ROSFORD SL. Puede ejercer sus derechos escribiendo a <a href=\"mailto:center@spaceforedu.com\" style=\"color:#0b69ff;text-decoration:none\">center@spaceforedu.com</a> o a CALLE BAHIA DE ALICANTE 82 PISO 1 D (28042) MADRID. Reclamaciones: <a href=\"https://www.aepd.es\" style=\"color:#0b69ff;text-decoration:none\">www.aepd.es</a>.`\n  },\n  'Inglés': {\n    subject: `Next Step: Homologation of Your Studies for ${titling}`,\n    greeting: `Dear ${firstName},`,\n    body: `<p style=\"margin:0 0 12px 0;font-size:16px;line-height:1.6\"><strong>Congratulations</strong> on your admission to the <strong>${titling}</strong> program at Universidad Europea! 🎉 We want to make your start as easy as possible.</p><p style=\"margin:0 0 12px 0;font-size:16px;line-height:1.6\">To begin, you will need to complete the <strong>recognition (homologation) of your previous education</strong>. At <em>Space for Edu</em> we guide you and simplify the entire process.</p><p style=\"margin:16px 0 8px 0;font-size:16px;line-height:1.6\"><strong>We are here so that:</strong></p><ul style=\"margin:0 0 12px 22px;padding:0;font-size:16px;line-height:1.6\"><li style=\"margin:0 0 6px 0\">You don't waste time with confusing procedures.</li><li style=\"margin:0 0 6px 0\">Your documentation is in order.</li><li style=\"margin:0 0 6px 0\">You focus on what matters: your studies and your future.</li></ul><p style=\"margin:12px 0 12px 0;font-size:16px;line-height:1.6\">Would you prefer <strong>WhatsApp</strong> or <strong>phone</strong>? Write to us at <a href=\"tel:+34635527594\" style=\"color:#0b69ff;text-decoration:none\">+34 635 52 75 94</a> or <a href=\"mailto:center@spaceforedu.com\" style=\"color:#0b69ff;text-decoration:none\">center@spaceforedu.com</a>.</p><p style=\"margin:12px 0 12px 0;font-size:16px;line-height:1.6\">Visit our website: <a href=\"https://spaceforedu.com/en/space-edu-english/\" style=\"color:#0b69ff;text-decoration:none\">spaceforedu.com</a></p><p style=\"margin:0 0 16px 0;font-size:16px;line-height:1.6\">We will be happy to accompany you in this important step.</p><p style=\"margin:0 0 2px 0;font-size:16px;line-height:1.6\">Looking forward to assisting you,</p><p style=\"margin:0 0 18px 0;font-size:16px;line-height:1.6\">Best regards,</p>`,\n    disclaimer: `In accordance with Organic Law 3/2018 and Regulation (EU) 2016/679, personal data will be processed by ROSFORD SL. Exercise your rights at <a href=\"mailto:center@spaceforedu.com\" style=\"color:#0b69ff;text-decoration:none\">center@spaceforedu.com</a>. Claims: <a href=\"https://www.aepd.es\" style=\"color:#0b69ff;text-decoration:none\">www.aepd.es</a>.`\n  },\n  'Francés': {\n    subject: `Prochaine étape : Homologation de vos études pour ${titling}`,\n    greeting: `Bonjour ${firstName},`,\n    body: `<p style=\"margin:0 0 12px 0;font-size:16px;line-height:1.6\"><strong>Félicitations</strong> pour votre admission au programme <strong>${titling}</strong> à l'Universidad Europea ! 🎉 Nous voulons faciliter au maximum vos débuts.</p><p style=\"margin:0 0 12px 0;font-size:16px;line-height:1.6\">Vous devrez effectuer <strong>l'homologation de vos études antérieures</strong>. Chez <em>Space for Edu</em>, nous simplifions tout le processus.</p><p style=\"margin:16px 0 8px 0;font-size:16px;line-height:1.6\"><strong>Nous sommes là pour que :</strong></p><ul style=\"margin:0 0 12px 22px;padding:0;font-size:16px;line-height:1.6\"><li style=\"margin:0 0 6px 0\">Vous ne perdiez pas de temps avec des démarches complexes.</li><li style=\"margin:0 0 6px 0\">Votre documentation soit en règle.</li><li style=\"margin:0 0 6px 0\">Vous vous concentriez sur l'essentiel : vos études.</li></ul><p style=\"margin:12px 0 12px 0;font-size:16px;line-height:1.6\">Préférez-vous <strong>WhatsApp</strong> ou <strong>téléphone</strong> ? Écrivez-nous au <a href=\"tel:+34635527594\" style=\"color:#0b69ff;text-decoration:none\">+34 635 52 75 94</a> ou à <a href=\"mailto:center@spaceforedu.com\" style=\"color:#0b69ff;text-decoration:none\">center@spaceforedu.com</a>.</p><p style=\"margin:12px 0 12px 0;font-size:16px;line-height:1.6\">Visitez notre site : <a href=\"https://spaceforedu.com/\" style=\"color:#0b69ff;text-decoration:none\">spaceforedu.com</a></p><p style=\"margin:0 0 2px 0;font-size:16px;line-height:1.6\">Dans l'attente de votre réponse,</p><p style=\"margin:0 0 18px 0;font-size:16px;line-height:1.6\">Cordialement,</p>`,\n    disclaimer: `Conformément à la Loi Organique 3/2018 et au Règlement (UE) 2016/679, les données personnelles seront traitées par ROSFORD SL. Droits : <a href=\"mailto:center@spaceforedu.com\" style=\"color:#0b69ff;text-decoration:none\">center@spaceforedu.com</a>. Réclamations : <a href=\"https://www.aepd.es\" style=\"color:#0b69ff;text-decoration:none\">www.aepd.es</a>.`\n  },\n  'Italiano': {\n    subject: `Prossimo passo: Omologazione dei tuoi studi per ${titling}`,\n    greeting: `Ciao ${firstName},`,\n    body: `<p style=\"margin:0 0 12px 0;font-size:16px;line-height:1.6\"><strong>Congratulazioni</strong> per la tua ammissione al programma <strong>${titling}</strong> presso l'Universidad Europea! 🎉 Vogliamo rendere il tuo inizio il più semplice possibile.</p><p style=\"margin:0 0 12px 0;font-size:16px;line-height:1.6\">Dovrai completare <strong>l'omologazione dei tuoi studi precedenti</strong>. A <em>Space for Edu</em> ci occupiamo di guidarti e semplificare tutto.</p><p style=\"margin:16px 0 8px 0;font-size:16px;line-height:1.6\"><strong>Siamo qui per:</strong></p><ul style=\"margin:0 0 12px 22px;padding:0;font-size:16px;line-height:1.6\"><li style=\"margin:0 0 6px 0\">Non perdere tempo con procedure complicate.</li><li style=\"margin:0 0 6px 0\">La tua documentazione sia in regola.</li><li style=\"margin:0 0 6px 0\">Concentrarti sui tuoi studi e il tuo futuro.</li></ul><p style=\"margin:12px 0 12px 0;font-size:16px;line-height:1.6\">Preferisci <strong>WhatsApp</strong> o <strong>telefono</strong>? Scrivici al <a href=\"tel:+34635527594\" style=\"color:#0b69ff;text-decoration:none\">+34 635 52 75 94</a> o a <a href=\"mailto:center@spaceforedu.com\" style=\"color:#0b69ff;text-decoration:none\">center@spaceforedu.com</a>.</p><p style=\"margin:12px 0 12px 0;font-size:16px;line-height:1.6\">Visita il nostro sito: <a href=\"https://spaceforedu.com/\" style=\"color:#0b69ff;text-decoration:none\">spaceforedu.com</a></p><p style=\"margin:0 0 2px 0;font-size:16px;line-height:1.6\">In attesa di un tuo riscontro,</p><p style=\"margin:0 0 18px 0;font-size:16px;line-height:1.6\">Cordiali saluti,</p>`,\n    disclaimer: `Ai sensi della Legge Organica 3/2018 e del Regolamento (UE) 2016/679, i dati personali saranno trattati da ROSFORD SL. Diritti: <a href=\"mailto:center@spaceforedu.com\" style=\"color:#0b69ff;text-decoration:none\">center@spaceforedu.com</a>. Reclami: <a href=\"https://www.aepd.es\" style=\"color:#0b69ff;text-decoration:none\">www.aepd.es</a>.`\n  }\n};\n\nconst t = templates[lang];\nconst langCode = lang === 'Español' ? 'es' : lang === 'Francés' ? 'fr' : lang === 'Italiano' ? 'it' : 'en';\n\nconst bodyHtml = `<!doctype html><html lang=\"${langCode}\"><head><meta charset=\"utf-8\"><meta name=\"x-apple-disable-message-reformatting\"><meta name=\"format-detection\" content=\"telephone=no, date=no, address=no, email=no\"></head><body style=\"margin:0;padding:0;background:#f5f7fa\"><center style=\"width:100%;background:#f5f7fa\"><table role=\"presentation\" cellspacing=\"0\" cellpadding=\"0\" border=\"0\" align=\"center\" width=\"100%\" style=\"max-width:600px;margin:0 auto;background:#ffffff\"><tr><td style=\"padding:28px;font-family:Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#111\"><p style=\"margin:0 0 14px 0;font-size:16px;line-height:1.5\">${t.greeting}</p>${t.body}</td></tr><tr><td style=\"padding:0 28px 24px 28px;font-family:Segoe UI,Roboto,Helvetica,Arial,sans-serif\"><table role=\"presentation\" cellspacing=\"0\" cellpadding=\"0\" border=\"0\" width=\"100%\"><tr><td style=\"width:200px;vertical-align:top;padding-right:20px\"><img src=\"https://spaceforedu.com/assets/SFE_Small_logo.jpg\" alt=\"Space for Edu\" width=\"160\" style=\"display:block;border:0\"></td><td style=\"vertical-align:top\"><table role=\"presentation\" cellspacing=\"0\" cellpadding=\"0\" border=\"0\" width=\"100%\" style=\"border:1px solid #e6e8eb;border-radius:12px\"><tr><td style=\"padding:16px 20px\"><p style=\"margin:0;font-size:18px;line-height:1.4;font-weight:700;color:#111\">Matvey Sinelnik</p><p style=\"margin:2px 0 10px 0;font-size:14px;color:#555;line-height:1.4\">Director — Rosford SL</p><p style=\"margin:0;font-size:14px;color:#111;line-height:1.7\">📞 <a href=\"tel:+34635527594\" style=\"color:#0b69ff;text-decoration:none\">(+34) 635 52 75 94</a><br>✉️ <a href=\"mailto:center@spaceforedu.com\" style=\"color:#0b69ff;text-decoration:none\">center@spaceforedu.com</a><br>🌐 <a href=\"https://www.spaceforedu.com\" style=\"color:#0b69ff;text-decoration:none\">www.spaceforedu.com</a></p></td></tr></table></td></tr></table></td></tr><tr><td style=\"padding:0 28px 28px 28px;font-family:Segoe UI,Roboto,Helvetica,Arial,sans-serif\"><p style=\"margin:0;font-size:12px;line-height:1.6;color:#6b7280\">${t.disclaimer}</p></td></tr></table></center></body></html>`;\n\nconst bodyText = bodyHtml.replace(/<[^>]+>/g, '').replace(/\\s+/g, ' ').trim();\n\nreturn [{\n  json: {\n    queue_id: job.queue_id,\n    lead_id: lead.id,\n    email: lead.email,\n    first_name: firstName,\n    subject: t.subject,\n    body_html: bodyHtml,\n    body_text: bodyText,\n    language: lang,\n    idempotency_key: idempotencyKey,\n    attempt_count: job.attempt_count\n  }\n}];"
+        "jsCode": "const lead = $('Pick 1 Lead').item.json;\n\nconst supportedLangs = ['Español', 'Francés', 'Inglés', 'Italiano'];\nlet lang = supportedLangs.includes(lead.language) ? lead.language : 'Inglés';\nconst firstName = lead.first_name || lead.full_name || 'Student';\nconst titling = (lead.titling || lead.tipo_producto || 'tu programa')\n  .replace(/^-\\s*/, '').replace(/\\s*-$/, '').replace(/\\.\\s*$/, '').trim();\n\nconst idempotencyKey = `cold_email:${lead.id}`;\n\nconst templates = {\n  'Español': {\n    subject: `Siguiente paso: Homologación de tus estudios para ${titling}`,\n    greeting: `Hola ${firstName},`,\n    body: `<p style=\"margin:0 0 12px 0;font-size:16px;line-height:1.6\"><strong>¡Felicidades</strong> por tu admisión al programa de <strong>${titling}</strong> en la Universidad Europea! 🎉 Sabemos lo importante que es para ti dar este paso y queremos que tu inicio sea lo más fácil posible.</p><p style=\"margin:0 0 12px 0;font-size:16px;line-height:1.6\">Para comenzar, necesitarás realizar la <strong>homologación de tus estudios previos</strong>. Es un requisito indispensable, pero no tienes por qué preocuparte: en <em>Space for Edu</em> nos encargamos de guiarte y simplificar todo el proceso.</p><p style=\"margin:16px 0 8px 0;font-size:16px;line-height:1.6\"><strong>Estamos aquí para que:</strong></p><ul style=\"margin:0 0 12px 22px;padding:0;font-size:16px;line-height:1.6\"><li style=\"margin:0 0 6px 0\">No pierdas tiempo con trámites confusos.</li><li style=\"margin:0 0 6px 0\">Tengas la tranquilidad de que tu documentación esté en regla.</li><li style=\"margin:0 0 6px 0\">Te enfoques en lo que realmente importa: tus estudios y tu futuro.</li></ul><p style=\"margin:12px 0 12px 0;font-size:16px;line-height:1.6\">¿Prefieres que te contactemos por <strong>WhatsApp</strong> o por <strong>teléfono</strong>? También nos puedes escribir al <a href=\"tel:+34635527594\" style=\"color:#0b69ff;text-decoration:none\">+34 635 52 75 94</a> o a <a href=\"mailto:center@spaceforedu.com\" style=\"color:#0b69ff;text-decoration:none\">center@spaceforedu.com</a>.</p><p style=\"margin:12px 0 12px 0;font-size:16px;line-height:1.6\">Visita nuestra web: <a href=\"https://spaceforedu.com/es/space-edu-espanol/\" style=\"color:#0b69ff;text-decoration:none\">spaceforedu.com</a></p><p style=\"margin:0 0 16px 0;font-size:16px;line-height:1.6\">Con mucho gusto te acompañaremos en este paso importante.</p><p style=\"margin:0 0 2px 0;font-size:16px;line-height:1.6\">Quedo pendiente,</p><p style=\"margin:0 0 18px 0;font-size:16px;line-height:1.6\">Saludos,</p>`,\n    disclaimer: `De conformidad con la Ley Orgánica 3/2018 y el Reglamento (UE) 2016/679, los datos personales serán tratados por ROSFORD SL con la finalidad de posibilitar las comunicaciones. Puede ejercer sus derechos escribiendo a <a href=\"mailto:center@spaceforedu.com\" style=\"color:#0b69ff;text-decoration:none\">center@spaceforedu.com</a> o a CALLE BAHIA DE ALICANTE 82 PISO 1 D (28042) MADRID. Reclamaciones: <a href=\"https://www.aepd.es\" style=\"color:#0b69ff;text-decoration:none\">www.aepd.es</a>.`\n  },\n  'Inglés': {\n    subject: `Next Step: Homologation of Your Studies for ${titling}`,\n    greeting: `Dear ${firstName},`,\n    body: `<p style=\"margin:0 0 12px 0;font-size:16px;line-height:1.6\"><strong>Congratulations</strong> on your admission to the <strong>${titling}</strong> program at Universidad Europea! 🎉 We want to make your start as easy as possible.</p><p style=\"margin:0 0 12px 0;font-size:16px;line-height:1.6\">To begin, you will need to complete the <strong>recognition (homologation) of your previous education</strong>. At <em>Space for Edu</em> we guide you and simplify the entire process.</p><p style=\"margin:16px 0 8px 0;font-size:16px;line-height:1.6\"><strong>We are here so that:</strong></p><ul style=\"margin:0 0 12px 22px;padding:0;font-size:16px;line-height:1.6\"><li style=\"margin:0 0 6px 0\">You don't waste time with confusing procedures.</li><li style=\"margin:0 0 6px 0\">Your documentation is in order.</li><li style=\"margin:0 0 6px 0\">You focus on what matters: your studies and your future.</li></ul><p style=\"margin:12px 0 12px 0;font-size:16px;line-height:1.6\">Would you prefer <strong>WhatsApp</strong> or <strong>phone</strong>? Write to us at <a href=\"tel:+34635527594\" style=\"color:#0b69ff;text-decoration:none\">+34 635 52 75 94</a> or <a href=\"mailto:center@spaceforedu.com\" style=\"color:#0b69ff;text-decoration:none\">center@spaceforedu.com</a>.</p><p style=\"margin:12px 0 12px 0;font-size:16px;line-height:1.6\">Visit our website: <a href=\"https://spaceforedu.com/en/space-edu-english/\" style=\"color:#0b69ff;text-decoration:none\">spaceforedu.com</a></p><p style=\"margin:0 0 16px 0;font-size:16px;line-height:1.6\">We will be happy to accompany you in this important step.</p><p style=\"margin:0 0 2px 0;font-size:16px;line-height:1.6\">Looking forward to assisting you,</p><p style=\"margin:0 0 18px 0;font-size:16px;line-height:1.6\">Best regards,</p>`,\n    disclaimer: `In accordance with Organic Law 3/2018 and Regulation (EU) 2016/679, personal data will be processed by ROSFORD SL. Exercise your rights at <a href=\"mailto:center@spaceforedu.com\" style=\"color:#0b69ff;text-decoration:none\">center@spaceforedu.com</a>. Claims: <a href=\"https://www.aepd.es\" style=\"color:#0b69ff;text-decoration:none\">www.aepd.es</a>.`\n  },\n  'Francés': {\n    subject: `Prochaine étape : Homologation de vos études pour ${titling}`,\n    greeting: `Bonjour ${firstName},`,\n    body: `<p style=\"margin:0 0 12px 0;font-size:16px;line-height:1.6\"><strong>Félicitations</strong> pour votre admission au programme <strong>${titling}</strong> à l'Universidad Europea ! 🎉 Nous voulons faciliter au maximum vos débuts.</p><p style=\"margin:0 0 12px 0;font-size:16px;line-height:1.6\">Vous devrez effectuer <strong>l'homologation de vos études antérieures</strong>. Chez <em>Space for Edu</em>, nous simplifions tout le processus.</p><p style=\"margin:16px 0 8px 0;font-size:16px;line-height:1.6\"><strong>Nous sommes là pour que :</strong></p><ul style=\"margin:0 0 12px 22px;padding:0;font-size:16px;line-height:1.6\"><li style=\"margin:0 0 6px 0\">Vous ne perdiez pas de temps avec des démarches complexes.</li><li style=\"margin:0 0 6px 0\">Votre documentation soit en règle.</li><li style=\"margin:0 0 6px 0\">Vous vous concentriez sur l'essentiel : vos études.</li></ul><p style=\"margin:12px 0 12px 0;font-size:16px;line-height:1.6\">Préférez-vous <strong>WhatsApp</strong> ou <strong>téléphone</strong> ? Écrivez-nous au <a href=\"tel:+34635527594\" style=\"color:#0b69ff;text-decoration:none\">+34 635 52 75 94</a> ou à <a href=\"mailto:center@spaceforedu.com\" style=\"color:#0b69ff;text-decoration:none\">center@spaceforedu.com</a>.</p><p style=\"margin:12px 0 12px 0;font-size:16px;line-height:1.6\">Visitez notre site : <a href=\"https://spaceforedu.com/\" style=\"color:#0b69ff;text-decoration:none\">spaceforedu.com</a></p><p style=\"margin:0 0 2px 0;font-size:16px;line-height:1.6\">Dans l'attente de votre réponse,</p><p style=\"margin:0 0 18px 0;font-size:16px;line-height:1.6\">Cordialement,</p>`,\n    disclaimer: `Conformément à la Loi Organique 3/2018 et au Règlement (UE) 2016/679, les données personnelles seront traitées par ROSFORD SL. Droits : <a href=\"mailto:center@spaceforedu.com\" style=\"color:#0b69ff;text-decoration:none\">center@spaceforedu.com</a>. Réclamations : <a href=\"https://www.aepd.es\" style=\"color:#0b69ff;text-decoration:none\">www.aepd.es</a>.`\n  },\n  'Italiano': {\n    subject: `Prossimo passo: Omologazione dei tuoi studi per ${titling}`,\n    greeting: `Ciao ${firstName},`,\n    body: `<p style=\"margin:0 0 12px 0;font-size:16px;line-height:1.6\"><strong>Congratulazioni</strong> per la tua ammissione al programma <strong>${titling}</strong> presso l'Universidad Europea! 🎉 Vogliamo rendere il tuo inizio il più semplice possibile.</p><p style=\"margin:0 0 12px 0;font-size:16px;line-height:1.6\">Dovrai completare <strong>l'omologazione dei tuoi studi precedenti</strong>. A <em>Space for Edu</em> ci occupiamo di guidarti e semplificare tutto.</p><p style=\"margin:16px 0 8px 0;font-size:16px;line-height:1.6\"><strong>Siamo qui per:</strong></p><ul style=\"margin:0 0 12px 22px;padding:0;font-size:16px;line-height:1.6\"><li style=\"margin:0 0 6px 0\">Non perdere tempo con procedure complicate.</li><li style=\"margin:0 0 6px 0\">La tua documentazione sia in regola.</li><li style=\"margin:0 0 6px 0\">Concentrarti sui tuoi studi e il tuo futuro.</li></ul><p style=\"margin:12px 0 12px 0;font-size:16px;line-height:1.6\">Preferisci <strong>WhatsApp</strong> o <strong>telefono</strong>? Scrivici al <a href=\"tel:+34635527594\" style=\"color:#0b69ff;text-decoration:none\">+34 635 52 75 94</a> o a <a href=\"mailto:center@spaceforedu.com\" style=\"color:#0b69ff;text-decoration:none\">center@spaceforedu.com</a>.</p><p style=\"margin:12px 0 12px 0;font-size:16px;line-height:1.6\">Visita il nostro sito: <a href=\"https://spaceforedu.com/\" style=\"color:#0b69ff;text-decoration:none\">spaceforedu.com</a></p><p style=\"margin:0 0 2px 0;font-size:16px;line-height:1.6\">In attesa di un tuo riscontro,</p><p style=\"margin:0 0 18px 0;font-size:16px;line-height:1.6\">Cordiali saluti,</p>`,\n    disclaimer: `Ai sensi della Legge Organica 3/2018 e del Regolamento (UE) 2016/679, i dati personali saranno trattati da ROSFORD SL. Diritti: <a href=\"mailto:center@spaceforedu.com\" style=\"color:#0b69ff;text-decoration:none\">center@spaceforedu.com</a>. Reclami: <a href=\"https://www.aepd.es\" style=\"color:#0b69ff;text-decoration:none\">www.aepd.es</a>.`\n  }\n};\n\nconst t = templates[lang];\nconst langCode = lang === 'Español' ? 'es' : lang === 'Francés' ? 'fr' : lang === 'Italiano' ? 'it' : 'en';\n\nconst bodyHtml = `<!doctype html><html lang=\"${langCode}\"><head><meta charset=\"utf-8\"><meta name=\"x-apple-disable-message-reformatting\"><meta name=\"format-detection\" content=\"telephone=no, date=no, address=no, email=no\"></head><body style=\"margin:0;padding:0;background:#f5f7fa\"><center style=\"width:100%;background:#f5f7fa\"><table role=\"presentation\" cellspacing=\"0\" cellpadding=\"0\" border=\"0\" align=\"center\" width=\"100%\" style=\"max-width:600px;margin:0 auto;background:#ffffff\"><tr><td style=\"padding:28px;font-family:Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#111\"><p style=\"margin:0 0 14px 0;font-size:16px;line-height:1.5\">${t.greeting}</p>${t.body}</td></tr><tr><td style=\"padding:0 28px 24px 28px;font-family:Segoe UI,Roboto,Helvetica,Arial,sans-serif\"><table role=\"presentation\" cellspacing=\"0\" cellpadding=\"0\" border=\"0\" width=\"100%\"><tr><td style=\"width:200px;vertical-align:top;padding-right:20px\"><img src=\"https://spaceforedu.com/assets/SFE_Small_logo.jpg\" alt=\"Space for Edu\" width=\"160\" style=\"display:block;border:0\"></td><td style=\"vertical-align:top\"><table role=\"presentation\" cellspacing=\"0\" cellpadding=\"0\" border=\"0\" width=\"100%\" style=\"border:1px solid #e6e8eb;border-radius:12px\"><tr><td style=\"padding:16px 20px\"><p style=\"margin:0;font-size:18px;line-height:1.4;font-weight:700;color:#111\">Matvey Sinelnik</p><p style=\"margin:2px 0 10px 0;font-size:14px;color:#555;line-height:1.4\">Director — Rosford SL</p><p style=\"margin:0;font-size:14px;color:#111;line-height:1.7\">📞 <a href=\"tel:+34635527594\" style=\"color:#0b69ff;text-decoration:none\">(+34) 635 52 75 94</a><br>✉️ <a href=\"mailto:center@spaceforedu.com\" style=\"color:#0b69ff;text-decoration:none\">center@spaceforedu.com</a><br>🌐 <a href=\"https://www.spaceforedu.com\" style=\"color:#0b69ff;text-decoration:none\">www.spaceforedu.com</a></p></td></tr></table></td></tr></table></td></tr><tr><td style=\"padding:0 28px 28px 28px;font-family:Segoe UI,Roboto,Helvetica,Arial,sans-serif\"><p style=\"margin:0;font-size:12px;line-height:1.6;color:#6b7280\">${t.disclaimer}</p></td></tr></table></center></body></html>`;\n\nconst bodyText = bodyHtml.replace(/<[^>]+>/g, '').replace(/\\s+/g, ' ').trim();\n\nreturn [{\n  json: {\n    lead_id: lead.id,\n    email: lead.email,\n    first_name: firstName,\n    language: lang,\n    subject: t.subject,\n    body_html: bodyHtml,\n    body_text: bodyText,\n    idempotency_key: idempotencyKey\n  }\n}];"
       },
       "id": "node-build-email",
       "name": "Build Email HTML",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [2440, 200]
+      "position": [1480, 200]
     },
     {
       "parameters": {
         "operation": "executeQuery",
-        "query": "INSERT INTO email_messages (lead_id, subject, body_html, body_text, campaign_type, status, idempotency_key)\nVALUES ($1, $2, $3, $4, 'cold_email', 'sending', $5)\nON CONFLICT (idempotency_key) WHERE idempotency_key IS NOT NULL\nDO UPDATE SET status = 'sending', updated_at = NOW()\nRETURNING id;",
+        "query": "INSERT INTO email_messages (lead_id, campaign_type, subject, body_html, body_text, status, idempotency_key)\nVALUES ($1, 'cold_email', $2, $3, $4, 'sending', $5)\nON CONFLICT (lead_id, campaign_type)\nDO UPDATE SET\n  status = 'sending',\n  retry_count = CASE\n    WHEN email_messages.status = 'failed'\n    THEN email_messages.retry_count + 1\n    ELSE email_messages.retry_count\n  END,\n  subject = EXCLUDED.subject,\n  body_html = EXCLUDED.body_html,\n  body_text = EXCLUDED.body_text,\n  error_message = NULL,\n  updated_at = NOW()\nRETURNING id, retry_count;",
         "options": {
           "queryParameterValues": {
             "values": [
@@ -257,11 +185,54 @@
           }
         }
       },
-      "id": "node-insert-msg",
-      "name": "Insert email_messages (idempotent)",
+      "id": "node-upsert-msg",
+      "name": "Upsert email_messages",
       "type": "n8n-nodes-base.postgres",
       "typeVersion": 2.5,
-      "position": [2680, 200],
+      "position": [1720, 200],
+      "credentials": {
+        "postgres": { "id": "", "name": "CRM Database" }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict" },
+          "conditions": [
+            {
+              "id": "cond-retry",
+              "leftValue": "={{ $json.retry_count }}",
+              "rightValue": "5",
+              "operator": { "type": "number", "operation": "gte" }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "node-if-maxretry",
+      "name": "IF Max Retries",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1960, 200]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE leads SET email_status = 'failed', updated_at = NOW() WHERE id = $1;\n\nUPDATE email_messages SET status = 'failed', error_message = 'Max retries exceeded', updated_at = NOW()\nWHERE lead_id = $1 AND campaign_type = 'cold_email';\n\nINSERT INTO email_events(email_message_id, lead_id, event_type, detail)\n  SELECT id, $1, 'max_retries', '{}'::jsonb\n  FROM email_messages WHERE lead_id = $1 AND campaign_type = 'cold_email';",
+        "options": {
+          "queryParameterValues": {
+            "values": [
+              { "name": "$1", "value": "={{ $('Build Email HTML').item.json.lead_id }}" }
+            ]
+          }
+        }
+      },
+      "id": "node-mark-maxretry",
+      "name": "Mark Lead Failed (max retries)",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [2200, 100],
       "credentials": {
         "postgres": { "id": "", "name": "CRM Database" }
       }
@@ -271,41 +242,41 @@
         "fromEmail": "center@spaceforedu.com",
         "toEmail": "={{ $('Build Email HTML').item.json.email }}",
         "subject": "={{ $('Build Email HTML').item.json.subject }}",
-        "contentHtml": "={{ $('Build Email HTML').item.json.body_html }}",
-        "additionalFields": {
-          "fromName": "Space for Education"
+        "emailType": "html",
+        "html": "={{ $('Build Email HTML').item.json.body_html }}",
+        "options": {
+          "senderName": "Space for Education"
         }
       },
-      "id": "node-sendgrid",
-      "name": "SendGrid Send",
-      "type": "n8n-nodes-base.sendGrid",
-      "typeVersion": 1,
-      "position": [2920, 200],
+      "id": "node-smtp-send",
+      "name": "Enviar Email SMTP",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [2200, 300],
       "credentials": {
-        "sendGridApi": { "id": "", "name": "SendGrid API" }
+        "smtp": { "id": "", "name": "SMTP Titan Mail" }
       },
       "onError": "continueErrorOutput"
     },
     {
       "parameters": {
         "operation": "executeQuery",
-        "query": "-- Mark message sent\nUPDATE email_messages\nSET status = 'sent', sent_at = NOW(), updated_at = NOW()\nWHERE id = $1;\n\n-- Mark queue job sent\nUPDATE email_queue\nSET status = 'sent', locked_by = NULL, locked_at = NULL, updated_at = NOW()\nWHERE id = $2;\n\n-- Mark lead sent\nUPDATE leads\nSET email_status = 'sent', last_email_sent_at = NOW(), updated_at = NOW()\nWHERE id = $3;\n\n-- Bump rate limit\nUPDATE rate_limits\nSET next_allowed_at = NOW() + INTERVAL '90 seconds', updated_at = NOW()\nWHERE key = 'sendgrid_global';\n\n-- Heartbeat lock\nUPDATE worker_locks\nSET heartbeat_at = NOW()\nWHERE lock_key = 'cold_email_worker' AND owner_id = $4;\n\n-- Audit event\nINSERT INTO email_events(email_message_id, lead_id, queue_job_id, event_type, detail)\nVALUES ($1, $3, $2, 'sent', '{}'::jsonb);",
+        "query": "-- Mark message sent\nUPDATE email_messages SET status = 'sent', sent_at = NOW(), updated_at = NOW() WHERE id = $1;\n\n-- Mark lead sent\nUPDATE leads SET email_status = 'sent', last_email_sent_at = NOW(), updated_at = NOW() WHERE id = $2;\n\n-- Heartbeat\nUPDATE worker_locks SET heartbeat_at = NOW(), updated_at = NOW() WHERE lock_key = 'cold_email_worker' AND owner_id = $3;\n\n-- Audit\nINSERT INTO email_events(email_message_id, lead_id, event_type, detail) VALUES ($1, $2, 'sent', '{}'::jsonb);",
         "options": {
           "queryParameterValues": {
             "values": [
-              { "name": "$1", "value": "={{ $('Insert email_messages (idempotent)').item.json.id }}" },
-              { "name": "$2", "value": "={{ $('Build Email HTML').item.json.queue_id }}" },
-              { "name": "$3", "value": "={{ $('Build Email HTML').item.json.lead_id }}" },
-              { "name": "$4", "value": "={{ $('Generate Worker ID').item.json.worker_id }}" }
+              { "name": "$1", "value": "={{ $('Upsert email_messages').item.json.id }}" },
+              { "name": "$2", "value": "={{ $('Build Email HTML').item.json.lead_id }}" },
+              { "name": "$3", "value": "={{ $('Generate Worker ID').item.json.worker_id }}" }
             ]
           }
         }
       },
       "id": "node-mark-sent",
-      "name": "Mark Sent + Rate Limit + Audit",
+      "name": "Mark Sent + Audit",
       "type": "n8n-nodes-base.postgres",
       "typeVersion": 2.5,
-      "position": [3160, 100],
+      "position": [2440, 200],
       "credentials": {
         "postgres": { "id": "", "name": "CRM Database" }
       }
@@ -313,73 +284,116 @@
     {
       "parameters": {
         "operation": "executeQuery",
-        "query": "-- Backoff + DLQ logic\nUPDATE email_queue\nSET status = CASE\n      WHEN attempt_count + 1 >= max_attempts THEN 'dead'\n      ELSE 'queued'\n    END,\n    attempt_count = attempt_count + 1,\n    next_attempt_at = CASE\n      WHEN attempt_count = 0 THEN NOW() + INTERVAL '5 minutes'\n      WHEN attempt_count = 1 THEN NOW() + INTERVAL '30 minutes'\n      WHEN attempt_count = 2 THEN NOW() + INTERVAL '2 hours'\n      WHEN attempt_count = 3 THEN NOW() + INTERVAL '12 hours'\n      ELSE NOW() + INTERVAL '24 hours'\n    END,\n    last_error = $2,\n    locked_by = NULL,\n    locked_at = NULL,\n    updated_at = NOW()\nWHERE id = $1\nRETURNING status;\n\n-- Mark message failed\nUPDATE email_messages\nSET status = 'failed', error_message = $2, updated_at = NOW()\nWHERE id = $3;\n\n-- Reset lead to queued (unless dead)\nUPDATE leads\nSET email_status = CASE\n      WHEN (SELECT status FROM email_queue WHERE id = $1) = 'dead' THEN 'failed'\n      ELSE 'queued'\n    END,\n    updated_at = NOW()\nWHERE id = $4;\n\n-- Heartbeat lock\nUPDATE worker_locks\nSET heartbeat_at = NOW()\nWHERE lock_key = 'cold_email_worker' AND owner_id = $5;\n\n-- Audit event\nINSERT INTO email_events(email_message_id, lead_id, queue_job_id, event_type, detail)\nVALUES ($3, $4, $1, 'failed', jsonb_build_object('error', $2));",
+        "query": "-- Mark message failed\nUPDATE email_messages SET status = 'failed', error_message = $2, updated_at = NOW() WHERE id = $1;\n\n-- Requeue lead o marcar failed si max retries\nUPDATE leads\nSET email_status = CASE\n      WHEN (SELECT retry_count FROM email_messages WHERE id = $1) >= 5 THEN 'failed'\n      ELSE 'queued'\n    END,\n    updated_at = NOW()\nWHERE id = $3;\n\n-- Heartbeat\nUPDATE worker_locks SET heartbeat_at = NOW(), updated_at = NOW() WHERE lock_key = 'cold_email_worker' AND owner_id = $4;\n\n-- Audit\nINSERT INTO email_events(email_message_id, lead_id, event_type, detail)\nVALUES ($1, $3, 'failed', jsonb_build_object('error', $2));",
         "options": {
           "queryParameterValues": {
             "values": [
-              { "name": "$1", "value": "={{ $('Build Email HTML').item.json.queue_id }}" },
-              { "name": "$2", "value": "={{ $json.error?.message || $json.message || 'SendGrid error' }}" },
-              { "name": "$3", "value": "={{ $('Insert email_messages (idempotent)').item.json.id }}" },
-              { "name": "$4", "value": "={{ $('Build Email HTML').item.json.lead_id }}" },
-              { "name": "$5", "value": "={{ $('Generate Worker ID').item.json.worker_id }}" }
+              { "name": "$1", "value": "={{ $('Upsert email_messages').item.json.id }}" },
+              { "name": "$2", "value": "={{ $json.error?.message || $json.message || 'SMTP error' }}" },
+              { "name": "$3", "value": "={{ $('Build Email HTML').item.json.lead_id }}" },
+              { "name": "$4", "value": "={{ $('Generate Worker ID').item.json.worker_id }}" }
             ]
           }
         }
       },
       "id": "node-mark-failed",
-      "name": "Mark Failed + Backoff + DLQ",
+      "name": "Mark Failed + Requeue",
       "type": "n8n-nodes-base.postgres",
       "typeVersion": 2.5,
-      "position": [3160, 340],
+      "position": [2440, 440],
       "credentials": {
         "postgres": { "id": "", "name": "CRM Database" }
       }
     },
     {
       "parameters": {
-        "amount": 5,
-        "unit": "seconds"
+        "operation": "executeQuery",
+        "query": "UPDATE worker_locks SET heartbeat_at = NOW(), updated_at = NOW()\nWHERE lock_key = 'cold_email_worker'\n  AND owner_id = $1;",
+        "options": {
+          "queryParameterValues": {
+            "values": [
+              { "name": "$1", "value": "={{ $('Generate Worker ID').item.json.worker_id }}" }
+            ]
+          }
+        }
       },
-      "id": "node-wait-ok",
-      "name": "Wait 5s then Loop",
-      "type": "n8n-nodes-base.wait",
-      "typeVersion": 1.1,
-      "position": [3400, 100],
-      "webhookId": "wait-ok-ent"
+      "id": "node-heartbeat",
+      "name": "Heartbeat Lock",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [2680, 320],
+      "credentials": {
+        "postgres": { "id": "", "name": "CRM Database" }
+      }
     },
     {
       "parameters": {
-        "amount": 5,
-        "unit": "seconds"
+        "operation": "executeQuery",
+        "query": "SELECT EXISTS(\n  SELECT 1 FROM leads\n  WHERE email_status = 'queued'\n    AND email_valid = true\n    AND active = true\n    AND last_email_sent_at IS NULL\n    AND unsubscribed_at IS NULL\n) AS has_more;",
+        "options": {}
       },
-      "id": "node-wait-err",
-      "name": "Wait 5s then Loop (Error)",
-      "type": "n8n-nodes-base.wait",
-      "typeVersion": 1.1,
-      "position": [3400, 340],
-      "webhookId": "wait-err-ent"
+      "id": "node-check-more",
+      "name": "Check More Queued",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [2920, 320],
+      "credentials": {
+        "postgres": { "id": "", "name": "CRM Database" }
+      }
     },
     {
       "parameters": {
-        "workflowId": "0bp6zhFmTVhXoxyX",
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict" },
+          "conditions": [
+            {
+              "id": "cond-more",
+              "leftValue": "={{ $json.has_more }}",
+              "rightValue": "",
+              "operator": { "type": "boolean", "operation": "true", "singleValue": true }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "node-if-more",
+      "name": "IF More Queued",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [3160, 320]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "DELETE FROM worker_locks WHERE lock_key = 'cold_email_worker' AND owner_id = $1;",
+        "options": {
+          "queryParameterValues": {
+            "values": [
+              { "name": "$1", "value": "={{ $('Generate Worker ID').item.json.worker_id }}" }
+            ]
+          }
+        }
+      },
+      "id": "node-release-fin",
+      "name": "Release Lock FIN",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [3400, 480],
+      "credentials": {
+        "postgres": { "id": "", "name": "CRM Database" }
+      }
+    },
+    {
+      "parameters": {
+        "workflowId": "={{ $workflow.id }}",
         "options": { "waitForSubWorkflow": false }
       },
-      "id": "node-self-ok",
-      "name": "Self-Call (next job)",
+      "id": "node-self-call",
+      "name": "Self-Call (next lead)",
       "type": "n8n-nodes-base.executeWorkflow",
-      "typeVersion": 1.1,
-      "position": [3640, 100]
-    },
-    {
-      "parameters": {
-        "workflowId": "0bp6zhFmTVhXoxyX",
-        "options": { "waitForSubWorkflow": false }
-      },
-      "id": "node-self-err",
-      "name": "Self-Call (after error)",
-      "type": "n8n-nodes-base.executeWorkflow",
-      "typeVersion": 1.1,
-      "position": [3640, 340]
+      "typeVersion": 1.2,
+      "position": [3400, 220]
     }
   ],
   "connections": {
@@ -397,60 +411,60 @@
     },
     "IF Got Lock": {
       "main": [
-        [{ "node": "Reap Stale Jobs", "type": "main", "index": 0 }],
+        [{ "node": "Reap Stale Leads", "type": "main", "index": 0 }],
         [{ "node": "FIN otro worker activo", "type": "main", "index": 0 }]
       ]
     },
-    "Reap Stale Jobs": {
-      "main": [[{ "node": "Check Rate Limit", "type": "main", "index": 0 }]]
+    "Reap Stale Leads": {
+      "main": [[{ "node": "Pick 1 Lead", "type": "main", "index": 0 }]]
     },
-    "Check Rate Limit": {
-      "main": [[{ "node": "IF Must Wait", "type": "main", "index": 0 }]]
+    "Pick 1 Lead": {
+      "main": [[{ "node": "IF Lead Found", "type": "main", "index": 0 }]]
     },
-    "IF Must Wait": {
+    "IF Lead Found": {
       "main": [
-        [{ "node": "Wait for Rate Limit", "type": "main", "index": 0 }],
-        [{ "node": "Pick 1 Job from Queue", "type": "main", "index": 0 }]
+        [{ "node": "Build Email HTML", "type": "main", "index": 0 }],
+        [{ "node": "Release Lock (no leads)", "type": "main", "index": 0 }]
       ]
-    },
-    "Wait for Rate Limit": {
-      "main": [[{ "node": "Pick 1 Job from Queue", "type": "main", "index": 0 }]]
-    },
-    "Pick 1 Job from Queue": {
-      "main": [[{ "node": "IF Job Found", "type": "main", "index": 0 }]]
-    },
-    "IF Job Found": {
-      "main": [
-        [{ "node": "Fetch Lead Data", "type": "main", "index": 0 }],
-        [{ "node": "Release Lock and FIN", "type": "main", "index": 0 }]
-      ]
-    },
-    "Fetch Lead Data": {
-      "main": [[{ "node": "Build Email HTML", "type": "main", "index": 0 }]]
     },
     "Build Email HTML": {
-      "main": [[{ "node": "Insert email_messages (idempotent)", "type": "main", "index": 0 }]]
+      "main": [[{ "node": "Upsert email_messages", "type": "main", "index": 0 }]]
     },
-    "Insert email_messages (idempotent)": {
-      "main": [[{ "node": "SendGrid Send", "type": "main", "index": 0 }]]
+    "Upsert email_messages": {
+      "main": [[{ "node": "IF Max Retries", "type": "main", "index": 0 }]]
     },
-    "SendGrid Send": {
+    "IF Max Retries": {
       "main": [
-        [{ "node": "Mark Sent + Rate Limit + Audit", "type": "main", "index": 0 }],
-        [{ "node": "Mark Failed + Backoff + DLQ", "type": "main", "index": 0 }]
+        [{ "node": "Mark Lead Failed (max retries)", "type": "main", "index": 0 }],
+        [{ "node": "Enviar Email SMTP", "type": "main", "index": 0 }]
       ]
     },
-    "Mark Sent + Rate Limit + Audit": {
-      "main": [[{ "node": "Wait 5s then Loop", "type": "main", "index": 0 }]]
+    "Mark Lead Failed (max retries)": {
+      "main": [[{ "node": "Heartbeat Lock", "type": "main", "index": 0 }]]
     },
-    "Mark Failed + Backoff + DLQ": {
-      "main": [[{ "node": "Wait 5s then Loop (Error)", "type": "main", "index": 0 }]]
+    "Enviar Email SMTP": {
+      "main": [
+        [{ "node": "Mark Sent + Audit", "type": "main", "index": 0 }],
+        [{ "node": "Mark Failed + Requeue", "type": "main", "index": 0 }]
+      ]
     },
-    "Wait 5s then Loop": {
-      "main": [[{ "node": "Self-Call (next job)", "type": "main", "index": 0 }]]
+    "Mark Sent + Audit": {
+      "main": [[{ "node": "Heartbeat Lock", "type": "main", "index": 0 }]]
     },
-    "Wait 5s then Loop (Error)": {
-      "main": [[{ "node": "Self-Call (after error)", "type": "main", "index": 0 }]]
+    "Mark Failed + Requeue": {
+      "main": [[{ "node": "Heartbeat Lock", "type": "main", "index": 0 }]]
+    },
+    "Heartbeat Lock": {
+      "main": [[{ "node": "Check More Queued", "type": "main", "index": 0 }]]
+    },
+    "Check More Queued": {
+      "main": [[{ "node": "IF More Queued", "type": "main", "index": 0 }]]
+    },
+    "IF More Queued": {
+      "main": [
+        [{ "node": "Self-Call (next lead)", "type": "main", "index": 0 }],
+        [{ "node": "Release Lock FIN", "type": "main", "index": 0 }]
+      ]
     }
   },
   "settings": {

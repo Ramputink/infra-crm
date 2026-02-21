@@ -1,0 +1,980 @@
+{
+  "name": "Importar Excel",
+  "nodes": [
+    {
+      "parameters": {
+        "formTitle": "Drag&Drop Homologations",
+        "formFields": {
+          "values": [
+            {
+              "fieldLabel": "Archivo A Procesar",
+              "fieldType": "file",
+              "fieldName": "excel_file",
+              "acceptFileTypes": ".xlsx,.xls",
+              "requiredField": true
+            },
+            {
+              "fieldLabel": "Descripción del lote",
+              "fieldName": "batch_description"
+            }
+          ]
+        },
+        "responseMode": "lastNode",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.formTrigger",
+      "typeVersion": 2.5,
+      "position": [
+        0,
+        0
+      ],
+      "id": "ef7ca270-cf30-40cf-aba8-c2b45d109d8a",
+      "name": "On form submission",
+      "webhookId": "4c9086d2-9191-4bc3-8051-7941bc707455",
+      "retryOnFail": false,
+      "notesInFlow": false
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "120d0952-8a6c-4bee-a815-62c03742c5e1",
+              "leftValue": "={{ $json.is_duplicate }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        560,
+        0
+      ],
+      "id": "d73c6d8f-47f6-4e5b-922f-41d896310797",
+      "name": "If"
+    },
+    {
+      "parameters": {
+        "message": "Este archivo ya fue importado",
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.chat",
+      "typeVersion": 1.2,
+      "position": [
+        752,
+        -128
+      ],
+      "id": "73c072ea-a03f-42cb-9a4a-504e50a71651",
+      "name": "Chat",
+      "webhookId": "0ef1f419-3332-4d25-89a8-a446c3ec0b73"
+    },
+    {
+      "parameters": {
+        "binaryData": true,
+        "binaryPropertyName": "excel_file",
+        "dataPropertyName": "fileHash"
+      },
+      "type": "n8n-nodes-base.crypto",
+      "typeVersion": 2,
+      "position": [
+        208,
+        0
+      ],
+      "id": "22ee78dc-000e-423c-9874-79e2c48f59ea",
+      "name": "Calcular SHA256"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT EXISTS (\n  SELECT 1\n  FROM import_batches\n  WHERE file_hash = $1\n) AS is_duplicate;\n",
+        "options": {
+          "queryReplacement": "={{ $json.fileHash }}\n"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        384,
+        0
+      ],
+      "id": "8fd62b6f-ca6b-4f7d-a72b-95d63cbd880c",
+      "name": "Verificar duplicado",
+      "alwaysOutputData": true,
+      "credentials": {
+        "postgres": {
+          "id": "2sDsV6t81TDqE91c",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH ins AS (\n  INSERT INTO public.import_batches (filename, file_hash, status, imported_by)\n  VALUES ($1, $2, $3, $4)\n  ON CONFLICT (file_hash) DO UPDATE\n    SET filename = EXCLUDED.filename\n  RETURNING id\n)\nSELECT id FROM ins\nUNION ALL\nSELECT id FROM public.import_batches WHERE file_hash = $2\nLIMIT 1;",
+        "options": {
+          "queryReplacement": "$('On form submission').first().binary.excel_file.fileName,   $('Crypto').first().json.fileHash,   'processing',   'n8n_form'"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        752,
+        16
+      ],
+      "id": "faf717eb-1a1d-4a98-a5ca-69e360525f66",
+      "name": "Registrar batch",
+      "credentials": {
+        "postgres": {
+          "id": "9YNkmOfiRiSlOmIT",
+          "name": "Postgres account 2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "xlsx",
+        "binaryPropertyName": "=excel_file",
+        "options": {
+          "headerRow": true
+        }
+      },
+      "type": "n8n-nodes-base.extractFromFile",
+      "typeVersion": 1.1,
+      "position": [
+        1200,
+        16
+      ],
+      "id": "080b98ca-f90b-495a-901e-c87a6c4702f6",
+      "name": "Parsear Excel"
+    },
+    {
+      "parameters": {
+        "jsCode": "const formItem = $('On form submission').first();\n\nreturn [{\n  json: $input.first().json,     // mantiene tu JSON actual (batch id, etc.)\n  binary: formItem.binary,       // reinyecta el excel_file\n}];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        992,
+        16
+      ],
+      "id": "318b582b-6dc4-4c43-8ddb-8a18e3f1f783",
+      "name": "Reinyectar Binario"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ============================================================\n// NODO 7: Normalizar Leads (con import_batch_id REAL)\n// ============================================================\n\nconst items = $input.all();\n\n// ⚠️ Debe existir el nodo que inserta en import_batches y devuelve el id\n// Cambia 'Registrar batch' por el nombre EXACTO de tu nodo en n8n.\nconst batchNodeName = 'Registrar batch';\n\n// Intentar obtener el batchId del nodo de registro\nconst batchId = $(batchNodeName).first()?.json?.id;\n\n// Si no existe, mejor fallar aquí que insertar con null y romper import_rows\nif (!batchId) {\n  throw new Error(\n    `No se pudo obtener batchId desde el nodo \"${batchNodeName}\". ` +\n    `Asegúrate de que el nodo hace INSERT en import_batches y tiene \"Return id\" activado.`\n  );\n}\n\nreturn items.map((item, index) => {\n  const d = item.json;\n\n  // === NOMBRE ===\n  const rawName = (d['Contacto'] || '').trim();\n  const parts = rawName.split(/\\s+/);\n\n  const firstNameParts = [];\n  const lastNameParts = [];\n\n  for (const part of parts) {\n    // Palabras como \"DE\", \"LA\", \"DEL\" van con el grupo actual\n    if (part.length <= 2 && part === part.toUpperCase()) {\n      if (lastNameParts.length > 0) lastNameParts.push(part.toLowerCase());\n      else firstNameParts.push(part);\n    } else if (part === part.toUpperCase() && part.length > 2) {\n      lastNameParts.push(part);\n    } else {\n      firstNameParts.push(part);\n    }\n  }\n\n  const capitalize = (str) => str.charAt(0).toUpperCase() + str.slice(1).toLowerCase();\n\n  const firstName = firstNameParts\n    .map(w => (w.length <= 2 ? w.toLowerCase() : capitalize(w)))\n    .join(' ') || rawName;\n\n  const lastName = lastNameParts\n    .map(w => (w.length <= 2 ? w.toLowerCase() : capitalize(w)))\n    .join(' ');\n\n  const fullName = `${firstName} ${lastName}`.trim();\n\n  // === EMAIL ===\n  const rawEmail = (d['Opportunity : Contact : Email'] || '').trim().toLowerCase();\n  const emailValid = /^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$/.test(rawEmail);\n\n  // === TELÉFONO ===\n  let phone = (d['Opportunity : Contacto : Phone'] || '').toString().trim();\n  phone = phone.replace(/\\.0$/, '');\n  phone = phone.replace(/[^\\d+]/g, '');\n  if (phone && !phone.startsWith('+')) phone = '+' + phone;\n\n  // === CATEGORÍA ===\n  const tipoProducto = (d['Tipo de Producto'] || '').toUpperCase().trim();\n  let category = 'sin_categorizar';\n\n  if (tipoProducto === 'GRADO') {\n    category = 'grado';\n  } else if (tipoProducto === 'CFGS' || tipoProducto === 'CURSO CORTO' || tipoProducto === 'MENCION') {\n    category = 'curso';\n  } else if (tipoProducto === 'POSTGRADO' || tipoProducto.includes('MASTER') || tipoProducto.includes('MÁSTER')) {\n    category = 'master';\n  }\n\n  // === SEDE / CAMPUS ===\n  const opportunityName = d['Opportunity Name'] || '';\n  let campus = 'otro';\n  if (opportunityName.includes('Andalucía') || opportunityName.includes('Andalucia')) {\n    campus = 'andalucia';\n  } else if (opportunityName.includes('Villaviciosa') || opportunityName.includes('Odón')) {\n    campus = 'villaviciosa';\n  }\n\n  // === FECHA INSCRIPCIÓN ===\n  let fechaInscripcion = null;\n  const rawFecha = d['Opportunity : Synced Quote : Fecha inscripción'];\n\n  if (rawFecha) {\n    if (typeof rawFecha === 'number') {\n      const jsDate = new Date((rawFecha - 25569) * 86400 * 1000);\n      fechaInscripcion = jsDate.toISOString().split('T')[0];\n    } else if (typeof rawFecha === 'string') {\n      const parsed = new Date(rawFecha);\n      if (!Number.isNaN(parsed.getTime())) {\n        fechaInscripcion = parsed.toISOString().split('T')[0];\n      }\n    } else if (rawFecha instanceof Date) {\n      fechaInscripcion = rawFecha.toISOString().split('T')[0];\n    }\n  }\n\n  // === COLUMNAS OPCIONALES ===\n  const source = d['Source'] ? d['Source'].toString().trim() : null;\n  const asesorConsolidacion = d['Asesor Consolidación'] ? d['Asesor Consolidación'].toString().trim() : null;\n\n  const tipoMatricula = d['Opportunity : Synced Quote : TipoMatricula']\n    ? d['Opportunity : Synced Quote : TipoMatricula'].toString().trim()\n    : null;\n\n  return {\n    json: {\n      // Datos normalizados\n      full_name: fullName,\n      first_name: firstName,\n      last_name: lastName,\n      email: emailValid ? rawEmail : null,\n      email_valid: emailValid,\n      phone: phone || null,\n      country: (d['País de Nacimiento'] || '').trim(),\n      language: (d['Opportunity : Contact : Contact Language'] || 'Español').trim(),\n      category,\n      campus,\n\n      // Datos académicos\n      tipo_producto: tipoProducto || null,\n      codigo_titulo: d['Código Título'] ? d['Código Título'].toString().trim() : null,\n      facultad: (d['Facultad'] || '').trim() || null,\n      titling: (d['Titling'] || '').trim() || null,\n      stage: (d['Stage'] || '').trim() || null,\n\n      // Datos comerciales\n      assessor: (d['Assessor name'] || '').trim() || null,\n      asesor_consolidacion: asesorConsolidacion,\n      source,\n      tipo_matricula: tipoMatricula,\n      application_number: d['Application number'] || null,\n      expediente: d['Nº de Expediente'] || null,\n      fecha_inscripcion: fechaInscripcion,\n\n      // Metadatos de importación\n      import_batch_id: batchId,\n      row_number: index + 1,\n\n      // ✅ Guardar como objeto para JSONB (mejor que string)\n      raw_data: d\n    }\n  };\n});"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1408,
+        16
+      ],
+      "id": "cd0b589c-211f-4c77-8912-82d92d1fd2d8",
+      "name": "Normalizar datos"
+    },
+    {
+      "parameters": {
+        "jsCode": "const items = $input.all();\nconst results = [];\n\nfor (const item of items) {\n  const d = item.json;\n  const errors = [];\n\n  if (!d.email) errors.push('email_missing_or_invalid');\n  if (!d.full_name || d.full_name.length < 2) errors.push('name_missing');\n\n  results.push({\n    json: {\n      ...d,\n      validation_errors: errors,\n      status: errors.length > 0 ? 'error' : 'ok'\n    }\n  });\n}\n\nreturn results;"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1616,
+        16
+      ],
+      "id": "714c8df7-332e-40eb-a079-14fb2e950b79",
+      "name": "Filtrar Invalidos"
+    },
+    {
+      "parameters": {
+        "jsCode": "return $input.all().filter(item => {\n  const email = item.json.email;\n  return typeof email === 'string' && email.trim() !== '';\n});"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1824,
+        16
+      ],
+      "id": "51762c08-4199-422c-a019-ffc199cbc7e1",
+      "name": "Limpiar Mails Vacios"
+    },
+    {
+      "parameters": {
+        "operation": "upsert",
+        "schema": {
+          "__rl": true,
+          "mode": "list",
+          "value": "public"
+        },
+        "table": {
+          "__rl": true,
+          "value": "leads",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "email_valid": "={{ $json.email_valid }}",
+            "email": "={{ $json.email }}",
+            "first_name": "={{ $json.first_name }}",
+            "last_name": "={{ $json.last_name }}",
+            "full_name": "={{ $json.full_name }}",
+            "phone": "={{ $json.phone }}",
+            "source": "={{ $json.source }}",
+            "category": "={{ $json.category }}",
+            "raw_data": "={{ $json.raw_data }}",
+            "import_batch_id": "={{ $json.import_batch_id }}",
+            "country": "={{ $json.country }}",
+            "language": "={{ $json.language }}",
+            "campus": "={{ $json.campus }}",
+            "tipo_producto": "={{ $json.tipo_producto }}",
+            "facultad": "={{ $json.facultad }}",
+            "titling": "={{ $json.titling }}",
+            "stage": "={{ $json.stage }}",
+            "assessor": "={{ $json.assessor }}",
+            "asesor_consolidacion": "={{ $json.asesor_consolidacion }}",
+            "tipo_matricula": "={{ $json.tipo_matricula }}",
+            "application_number": "={{ $json.application_number }}",
+            "expediente": "={{ $json.expediente }}",
+            "fecha_inscripcion": "={{ $json.fecha_inscripcion }}"
+          },
+          "matchingColumns": [
+            "email"
+          ],
+          "schema": [
+            {
+              "id": "id",
+              "displayName": "id",
+              "required": false,
+              "defaultMatch": true,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": true
+            },
+            {
+              "id": "email",
+              "displayName": "email",
+              "required": true,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "first_name",
+              "displayName": "first_name",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": false
+            },
+            {
+              "id": "last_name",
+              "displayName": "last_name",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": false
+            },
+            {
+              "id": "full_name",
+              "displayName": "full_name",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": false
+            },
+            {
+              "id": "phone",
+              "displayName": "phone",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": false
+            },
+            {
+              "id": "source",
+              "displayName": "source",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": false
+            },
+            {
+              "id": "category",
+              "displayName": "category",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": false
+            },
+            {
+              "id": "email_valid",
+              "displayName": "email_valid",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "boolean",
+              "canBeUsedToMatch": false
+            },
+            {
+              "id": "raw_data",
+              "displayName": "raw_data",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "object",
+              "canBeUsedToMatch": false
+            },
+            {
+              "id": "import_batch_id",
+              "displayName": "import_batch_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": false
+            },
+            {
+              "id": "created_at",
+              "displayName": "created_at",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "dateTime",
+              "canBeUsedToMatch": false
+            },
+            {
+              "id": "updated_at",
+              "displayName": "updated_at",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "dateTime",
+              "canBeUsedToMatch": false
+            },
+            {
+              "id": "country",
+              "displayName": "country",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": false
+            },
+            {
+              "id": "language",
+              "displayName": "language",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": false
+            },
+            {
+              "id": "campus",
+              "displayName": "campus",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": false
+            },
+            {
+              "id": "tipo_producto",
+              "displayName": "tipo_producto",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": false
+            },
+            {
+              "id": "facultad",
+              "displayName": "facultad",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": false
+            },
+            {
+              "id": "titling",
+              "displayName": "titling",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": false
+            },
+            {
+              "id": "stage",
+              "displayName": "stage",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": false
+            },
+            {
+              "id": "assessor",
+              "displayName": "assessor",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": false
+            },
+            {
+              "id": "asesor_consolidacion",
+              "displayName": "asesor_consolidacion",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": false
+            },
+            {
+              "id": "tipo_matricula",
+              "displayName": "tipo_matricula",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": false
+            },
+            {
+              "id": "application_number",
+              "displayName": "application_number",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": false
+            },
+            {
+              "id": "expediente",
+              "displayName": "expediente",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": false
+            },
+            {
+              "id": "fecha_inscripcion",
+              "displayName": "fecha_inscripcion",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "dateTime",
+              "canBeUsedToMatch": false
+            },
+            {
+              "id": "titling_localized",
+              "displayName": "titling_localized",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": false
+            },
+            {
+              "id": "titling_localized_lang",
+              "displayName": "titling_localized_lang",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {
+          "replaceEmptyStrings": true
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        2048,
+        16
+      ],
+      "id": "8ee946fc-4cba-4565-b5d1-4ee6cc854867",
+      "name": "Registro Crm",
+      "credentials": {
+        "postgres": {
+          "id": "9YNkmOfiRiSlOmIT",
+          "name": "Postgres account 2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "upsert",
+        "schema": {
+          "__rl": true,
+          "mode": "list",
+          "value": "public"
+        },
+        "table": {
+          "__rl": true,
+          "value": "import_rows",
+          "mode": "list",
+          "cachedResultName": "import_rows"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "import_batch_id": "={{ $json.import_batch_id }}",
+            "row_number": "={{ $json.row_number }}",
+            "raw_data": "={{ $json.raw_data }}",
+            "lead_email": "={{ $json.email }}",
+            "status": "={{ $json.status }}",
+            "error_message": "={{ $json.validation_errors }}"
+          },
+          "matchingColumns": [
+            "id"
+          ],
+          "schema": [
+            {
+              "id": "id",
+              "displayName": "id",
+              "required": false,
+              "defaultMatch": true,
+              "display": true,
+              "type": "number",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "import_batch_id",
+              "displayName": "import_batch_id",
+              "required": true,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "row_number",
+              "displayName": "row_number",
+              "required": true,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "raw_data",
+              "displayName": "raw_data",
+              "required": true,
+              "defaultMatch": false,
+              "display": true,
+              "type": "object",
+              "canBeUsedToMatch": false
+            },
+            {
+              "id": "lead_email",
+              "displayName": "lead_email",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": false
+            },
+            {
+              "id": "lead_id",
+              "displayName": "lead_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": false,
+              "removed": true
+            },
+            {
+              "id": "status",
+              "displayName": "status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": false
+            },
+            {
+              "id": "error_message",
+              "displayName": "error_message",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": false
+            },
+            {
+              "id": "created_at",
+              "displayName": "created_at",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "dateTime",
+              "canBeUsedToMatch": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        2272,
+        16
+      ],
+      "id": "ffff08c6-0378-4322-94f6-89960df14880",
+      "name": "Log Import Row (OK)",
+      "credentials": {
+        "postgres": {
+          "id": "9YNkmOfiRiSlOmIT",
+          "name": "Postgres account 2"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE public.import_batches\nSET status = 'completed',\n    row_count = (SELECT COUNT(*) FROM public.import_rows WHERE import_batch_id = $1),\n    success_count = (SELECT COUNT(*) FROM public.import_rows WHERE import_batch_id = $1 AND status = 'ok'),\n    error_count = (SELECT COUNT(*) FROM public.import_rows WHERE import_batch_id = $1 AND status = 'error'),\n    completed_at = NOW()\nWHERE id = $1\nRETURNING id, status, row_count, success_count, error_count, completed_at;",
+        "options": {
+          "queryReplacement": "={{ $('Registrar batch').first().json.id }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        2464,
+        16
+      ],
+      "id": "93a161eb-1114-4570-aebc-93686de9997f",
+      "name": "Actualizar Batch (completed + stats)",
+      "executeOnce": true,
+      "credentials": {
+        "postgres": {
+          "id": "9YNkmOfiRiSlOmIT",
+          "name": "Postgres account 2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "completion",
+        "completionTitle": "✅ Importación completada correctamente",
+        "completionMessage": "=Batch ID: {{ $json.id }}\n\nEstado: {{ $json.status }}\n\nFilas procesadas: {{ $json.row_count }}\nRegistros guardados: {{ $json.success_count }}\nErrores detectados: {{ $json.error_count }}\n\nFinalizado en: {{ $json.completed_at }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.form",
+      "typeVersion": 2.5,
+      "position": [
+        3088,
+        16
+      ],
+      "id": "cba864dc-8771-4200-a928-bc42a2709e0c",
+      "name": "Form",
+      "webhookId": "cc859243-9c19-4ebb-86b1-ea0c78b151bc"
+    },
+    {
+      "parameters": {
+        "operation": "completion",
+        "completionTitle": "⚠️ Archivo ya importado",
+        "completionMessage": "=El archivo \"{{ $('On form submission').first().binary.excel_file.fileName }}\"\nya fue importado anteriormente.\n\nHash del archivo:\n{{ $('Calcular SHA256').first().json.fileHash }}\n\nNo se ha vuelto a procesar para evitar duplicados.\n\nSi necesitas forzar una nueva importación,\nmodifica el archivo antes de subirlo.",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.form",
+      "typeVersion": 2.5,
+      "position": [
+        960,
+        -128
+      ],
+      "id": "7649ed75-12cb-4aba-a1e6-31591da515cb",
+      "name": "Form1",
+      "webhookId": "214328dd-efd4-4723-9a7e-07a0cb22a12c"
+    },
+    {
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "value": "0bp6zhFmTVhXoxyX",
+          "mode": "list",
+          "cachedResultUrl": "/workflow/0bp6zhFmTVhXoxyX",
+          "cachedResultName": "ColdEmailSender"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {},
+          "matchingColumns": [],
+          "schema": [],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": true
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.3,
+      "position": [
+        2880,
+        16
+      ],
+      "id": "a5833719-4d75-4566-b12c-d2c0d84fd915",
+      "name": "Call 'ColdEmailSender'",
+      "executeOnce": false
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH updated AS (\n  UPDATE leads\n  SET email_status = 'queued'\n  WHERE import_batch_id = $1\n    AND email_valid = true\n    AND last_email_sent_at IS NULL\n    AND email_status IN ('new','queued')\n  RETURNING id\n)\nSELECT $1::uuid AS batch_id,\n       COUNT(*) AS queued_count\nFROM updated;",
+        "options": {
+          "queryReplacement": "={{ $json.id }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        2672,
+        16
+      ],
+      "id": "4b97a6d1-cc23-4f88-8e86-473faa8424b1",
+      "name": "Añadir qued",
+      "credentials": {
+        "postgres": {
+          "id": "9YNkmOfiRiSlOmIT",
+          "name": "Postgres account 2"
+        }
+      }
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "On form submission": {
+      "main": [
+        [
+          {
+            "node": "Calcular SHA256",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If": {
+      "main": [
+        [
+          {
+            "node": "Chat",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Registrar batch",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Calcular SHA256": {
+      "main": [
+        [
+          {
+            "node": "Verificar duplicado",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Verificar duplicado": {
+      "main": [
+        [
+          {
+            "node": "If",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Registrar batch": {
+      "main": [
+        [
+          {
+            "node": "Reinyectar Binario",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parsear Excel": {
+      "main": [
+        [
+          {
+            "node": "Normalizar datos",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Reinyectar Binario": {
+      "main": [
+        [
+          {
+            "node": "Parsear Excel",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalizar datos": {
+      "main": [
+        [
+          {
+            "node": "Filtrar Invalidos",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Filtrar Invalidos": {
+      "main": [
+        [
+          {
+            "node": "Limpiar Mails Vacios",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Limpiar Mails Vacios": {
+      "main": [
+        [
+          {
+            "node": "Registro Crm",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Registro Crm": {
+      "main": [
+        [
+          {
+            "node": "Log Import Row (OK)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Log Import Row (OK)": {
+      "main": [
+        [
+          {
+            "node": "Actualizar Batch (completed + stats)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Actualizar Batch (completed + stats)": {
+      "main": [
+        [
+          {
+            "node": "Añadir qued",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Chat": {
+      "main": [
+        [
+          {
+            "node": "Form1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Call 'ColdEmailSender'": {
+      "main": [
+        [
+          {
+            "node": "Form",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Añadir qued": {
+      "main": [
+        [
+          {
+            "node": "Call 'ColdEmailSender'",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": false
+  },
+  "versionId": "22937a58-2035-4218-8f71-f42c42a744d8",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "592b623edb0f75bbdf9e23bd5053c4d11f27689a570b29e5f93da69dfd507f48"
+  },
+  "id": "eSCAwIF3pucAJcs7",
+  "tags": []
+}

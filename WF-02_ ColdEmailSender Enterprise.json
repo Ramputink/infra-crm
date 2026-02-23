@@ -1,0 +1,824 @@
+{
+  "name": "WF-02: ColdEmailSender Enterprise",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "6ec36412-1692-4902-9c41-701fcf887a03",
+      "name": "Execute Workflow Trigger",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1,
+      "position": [
+        -2256,
+        1552
+      ]
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "*/2 9-21 * * 1-5"
+            }
+          ]
+        }
+      },
+      "id": "5da26e10-d758-4903-976d-b6c28bfb5336",
+      "name": "Cron Backup L-V cada 2min",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -2256,
+        1744
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const workerId = `wf2_${$execution.id.substring(0, 12)}_${Date.now()}`;\nreturn [{ json: { worker_id: workerId } }];"
+      },
+      "id": "46909dea-0ec7-4588-8cac-27ab4e96f1f9",
+      "name": "Generate Worker ID",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1744,
+        1648
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO worker_locks(lock_key, owner_id, heartbeat_at)\nVALUES ('cold_email_worker', $1, NOW())\nON CONFLICT (lock_key) DO UPDATE\nSET owner_id = EXCLUDED.owner_id,\n    heartbeat_at = NOW()\nWHERE worker_locks.heartbeat_at < NOW() - INTERVAL '2 minutes'\nRETURNING lock_key, owner_id, heartbeat_at;",
+        "options": {
+          "queryReplacement": "={{ $json.worker_id }}"
+        }
+      },
+      "id": "62e588fb-bb63-4a1a-b4c2-428a9a2ca8e4",
+      "name": "Acquire Persistent Lock",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        -1504,
+        1648
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "9YNkmOfiRiSlOmIT",
+          "name": "Postgres account 2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": false,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "cond-lock",
+              "leftValue": "={{ $json.lock_key }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "isNotEmpty"
+              }
+            },
+            {
+              "id": "f89d25c0-f3d3-4be7-9620-7c1b559f3e20",
+              "leftValue": "={{ $json.lock_key }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {
+          "ignoreCase": true
+        }
+      },
+      "id": "5a034887-942d-47e6-a589-a9f59f7416fa",
+      "name": "IF Got Lock",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        -1264,
+        1648
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "5bed797a-014d-4a20-afea-c0c5d1c2223a",
+      "name": "FIN otro worker activo",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        -1024,
+        1808
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE leads\nSET email_status = 'queued',\n    updated_at = NOW()\nWHERE email_status = 'sending'\n  AND updated_at < NOW() - INTERVAL '10 minutes'\nRETURNING id;",
+        "options": {}
+      },
+      "id": "151d3c2f-91ff-47ab-a79b-1677db21720c",
+      "name": "Reap Stale Leads",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        -1024,
+        1552
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "9YNkmOfiRiSlOmIT",
+          "name": "Postgres account 2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH next_lead AS (\n  SELECT id\n  FROM leads\n  WHERE email_status = 'queued'\n    AND email_valid = true\n    AND last_email_sent_at IS NULL\n    AND unsubscribed_at IS NULL\n  ORDER BY created_at ASC\n  LIMIT 1\n  FOR UPDATE SKIP LOCKED\n)\nUPDATE leads l\nSET email_status = 'sending',\n    updated_at = NOW()\nFROM next_lead\nWHERE l.id = next_lead.id\nRETURNING l.id, l.email, l.full_name, l.first_name, l.last_name,\n          l.category, l.language, l.country, l.campus,\n          l.tipo_producto, l.titling, l.facultad, l.phone;",
+        "options": {}
+      },
+      "id": "86cd47dc-eb7e-47f4-a4aa-02dfe5067da8",
+      "name": "Pick 1 Lead",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        -784,
+        1552
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "9YNkmOfiRiSlOmIT",
+          "name": "Postgres account 2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "cond-lead",
+              "leftValue": "={{ $json.id }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "isNotEmpty"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "6420038e-58f8-47af-9b76-ff68ced3a5b4",
+      "name": "IF Lead Found",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        -544,
+        1552
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "DELETE FROM worker_locks WHERE lock_key = 'cold_email_worker' AND owner_id = $1;",
+        "options": {
+          "queryReplacement": "={{ $('Generate Worker ID').first().json.worker_id }}"
+        }
+      },
+      "id": "c25f099b-42a4-4111-bf1b-3b20146adc11",
+      "name": "Release Lock (no leads)",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        -304,
+        1744
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "9YNkmOfiRiSlOmIT",
+          "name": "Postgres account 2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// ============================================================\n// NODO: Build Email HTML (ACTUALIZADO)\n// - Subject personalizado con nombre\n// - Copy mejorado (emocional, no burocrático)\n// - Botón CTA \"Quiero más información\" → mailto\n// - Tracking pixel preparado (activar cuando tengas endpoint)\n// ============================================================\n\nconst lead = $('Pick 1 Lead').item.json;\n\nconst supportedLangs = ['Español', 'Francés', 'Inglés', 'Italiano'];\nlet lang = supportedLangs.includes(lead.language) ? lead.language : 'Inglés';\nconst firstName = lead.first_name || lead.full_name || 'Student';\nconst titling = (lead.titling || lead.tipo_producto || 'tu programa')\n  .replace(/^-\\s*/, '').replace(/\\s*-$/, '').replace(/\\.\\s*$/, '').trim();\n\nconst idempotencyKey = `cold_email:${lead.id}`;\n\n// ── Mailto pre-rellenado por idioma (subject + body) ──\nconst country = lead.country || '___';\n\nconst mailtoSubjects = {\n  'Español': `Solicitud de información - Homologación para ${titling}`,\n  'Inglés': `Information request - Homologation for ${titling}`,\n  'Francés': `Demande d'information - Homologation pour ${titling}`,\n  'Italiano': `Richiesta informazioni - Omologazione per ${titling}`\n};\n\nconst mailtoBodies = {\n  'Español': `Hola,\\n\\nSoy ${firstName} y estoy interesado/a en recibir más información sobre el proceso de homologación para ${titling} en la Universidad Europea.\\n\\nMis estudios previos son del país: ${country}\\nCarrera/título obtenido: [completar aquí]\\n\\nQuedo a la espera de su respuesta.\\n\\nSaludos,\\n${firstName}`,\n  'Inglés': `Hello,\\n\\nMy name is ${firstName} and I'm interested in receiving more information about the homologation process for ${titling} at Universidad Europea.\\n\\nMy previous studies are from: ${country}\\nDegree obtained: [please complete here]\\n\\nLooking forward to your reply.\\n\\nBest regards,\\n${firstName}`,\n  'Francés': `Bonjour,\\n\\nJe suis ${firstName} et je souhaite recevoir plus d'informations sur le processus d'homologation pour ${titling} à l'Universidad Europea.\\n\\nMes études précédentes viennent du pays : ${country}\\nDiplôme obtenu : [à compléter ici]\\n\\nDans l'attente de votre réponse.\\n\\nCordialement,\\n${firstName}`,\n  'Italiano': `Ciao,\\n\\nSono ${firstName} e sono interessato/a a ricevere maggiori informazioni sul processo di omologazione per ${titling} all'Universidad Europea.\\n\\nI miei studi precedenti sono del paese: ${country}\\nTitolo ottenuto: [completare qui]\\n\\nIn attesa di una vostra risposta.\\n\\nCordiali saluti,\\n${firstName}`\n};\n\nconst mailtoHref = `mailto:center@spaceforedu.com?subject=${encodeURIComponent(mailtoSubjects[lang])}&body=${encodeURIComponent(mailtoBodies[lang])}`;\n\n// ── Botón CTA ──\nconst ctaLabels = {\n  'Español': 'Quiero más información',\n  'Inglés': 'I want more information',\n  'Francés': 'Je veux en savoir plus',\n  'Italiano': 'Voglio saperne di più'\n};\n\nconst ctaButton = `<table role=\"presentation\" cellspacing=\"0\" cellpadding=\"0\" border=\"0\" align=\"center\" style=\"margin:24px auto 20px auto\"><tr><td style=\"border-radius:8px;background:#0b69ff\"><a href=\"${mailtoHref}\" target=\"_blank\" style=\"display:inline-block;padding:14px 36px;font-size:16px;font-weight:700;color:#ffffff;text-decoration:none;border-radius:8px;font-family:Segoe UI,Roboto,Helvetica,Arial,sans-serif\">${ctaLabels[lang]}</a></td></tr></table>`;\n\n// ── TRACKING PIXEL (activar cuando tengas endpoint) ──\n// Reemplaza YOUR_TRACKING_URL por tu endpoint real.\n// Ejemplo con n8n webhook: https://tu-n8n.com/webhook/track-open?lid={{lead.id}}\n// Ejemplo con servidor propio: https://spaceforedu.com/track/open?lid={{lead.id}}\nconst TRACKING_ENABLED = false;\nconst trackingUrl = `https://YOUR_TRACKING_URL/track?lid=${lead.id}&t=${Date.now()}`;\nconst trackingPixel = TRACKING_ENABLED\n  ? `<img src=\"${trackingUrl}\" width=\"1\" height=\"1\" alt=\"\" style=\"display:block;width:1px;height:1px;border:0;overflow:hidden\" />`\n  : '';\n\n// ── Templates por idioma ──\nconst templates = {\n  'Español': {\n    subject: `${firstName}, solo falta un paso para empezar tu ${titling}`,\n    greeting: `Hola ${firstName},`,\n    body: `<p style=\"margin:0 0 14px 0;font-size:16px;line-height:1.6\"><strong>¡Enhorabuena por tu admisión</strong> al programa de <strong>${titling}</strong> en la Universidad Europea! 🎉</p>\n<p style=\"margin:0 0 14px 0;font-size:16px;line-height:1.6\">Sabemos que este momento es muy especial para ti. Y queremos que empieces con buen pie: <strong>nosotros nos encargamos de toda la gestión de tu homologación</strong> para que tú solo te preocupes de disfrutar esta nueva etapa.</p>\n<p style=\"margin:0 0 14px 0;font-size:16px;line-height:1.6\">En <em>Space for Edu</em> ya hemos acompañado a cientos de estudiantes internacionales como tú. Nuestro equipo se ocupa de:</p>\n<ul style=\"margin:0 0 14px 22px;padding:0;font-size:16px;line-height:1.8\"><li style=\"margin:0 0 4px 0\">Revisar y preparar toda tu documentación.</li><li style=\"margin:0 0 4px 0\">Presentarla ante el organismo correspondiente.</li><li style=\"margin:0 0 4px 0\">Mantenerte informado en cada paso del proceso.</li></ul>\n<p style=\"margin:0 0 6px 0;font-size:16px;line-height:1.6\"><strong>¿Tienes dudas? Escríbenos y te respondemos en menos de 24 horas:</strong></p>\n${ctaButton}\n<p style=\"margin:0 0 14px 0;font-size:14px;line-height:1.6;color:#555;text-align:center\">O si lo prefieres, escríbenos por WhatsApp al <a href=\"https://wa.me/34635527594?text=${encodeURIComponent(`Hola, soy ${firstName} y quiero información sobre la homologación para ${titling}`)}\" style=\"color:#0b69ff;text-decoration:none\">+34 635 52 75 94</a></p>`,\n    closing: `<p style=\"margin:20px 0 2px 0;font-size:16px;line-height:1.6\">Un abrazo,</p>`,\n    disclaimer: `De conformidad con la Ley Orgánica 3/2018 y el Reglamento (UE) 2016/679, los datos personales serán tratados por ROSFORD SL con la finalidad de posibilitar las comunicaciones. Puede ejercer sus derechos escribiendo a <a href=\"mailto:center@spaceforedu.com\" style=\"color:#0b69ff;text-decoration:none\">center@spaceforedu.com</a> o a CALLE BAHIA DE ALICANTE 82 PISO 1 D (28042) MADRID. Reclamaciones: <a href=\"https://www.aepd.es\" style=\"color:#0b69ff;text-decoration:none\">www.aepd.es</a>.`\n  },\n  'Inglés': {\n    subject: `${firstName}, just one step left to start your ${titling}`,\n    greeting: `Dear ${firstName},`,\n    body: `<p style=\"margin:0 0 14px 0;font-size:16px;line-height:1.6\"><strong>Congratulations on your admission</strong> to the <strong>${titling}</strong> program at Universidad Europea! 🎉</p>\n<p style=\"margin:0 0 14px 0;font-size:16px;line-height:1.6\">We know how exciting this moment is. And we want to make it easy: <strong>we handle your entire homologation process</strong> so you can focus on what really matters — your studies.</p>\n<p style=\"margin:0 0 14px 0;font-size:16px;line-height:1.6\">At <em>Space for Edu</em>, we've helped hundreds of international students just like you. Our team takes care of:</p>\n<ul style=\"margin:0 0 14px 22px;padding:0;font-size:16px;line-height:1.8\"><li style=\"margin:0 0 4px 0\">Reviewing and preparing all your documentation.</li><li style=\"margin:0 0 4px 0\">Submitting it to the relevant authority.</li><li style=\"margin:0 0 4px 0\">Keeping you updated at every step.</li></ul>\n<p style=\"margin:0 0 6px 0;font-size:16px;line-height:1.6\"><strong>Have questions? Write to us and we'll reply within 24 hours:</strong></p>\n${ctaButton}\n<p style=\"margin:0 0 14px 0;font-size:14px;line-height:1.6;color:#555;text-align:center\">Or if you prefer, message us on WhatsApp at <a href=\"https://wa.me/34635527594?text=${encodeURIComponent(`Hi, I'm ${firstName} and I want information about the homologation for ${titling}`)}\" style=\"color:#0b69ff;text-decoration:none\">+34 635 52 75 94</a></p>`,\n    closing: `<p style=\"margin:20px 0 2px 0;font-size:16px;line-height:1.6\">Best regards,</p>`,\n    disclaimer: `In accordance with Organic Law 3/2018 and Regulation (EU) 2016/679, personal data will be processed by ROSFORD SL. Exercise your rights at <a href=\"mailto:center@spaceforedu.com\" style=\"color:#0b69ff;text-decoration:none\">center@spaceforedu.com</a>. Claims: <a href=\"https://www.aepd.es\" style=\"color:#0b69ff;text-decoration:none\">www.aepd.es</a>.`\n  },\n  'Francés': {\n    subject: `${firstName}, plus qu'une étape pour commencer ton ${titling}`,\n    greeting: `Bonjour ${firstName},`,\n    body: `<p style=\"margin:0 0 14px 0;font-size:16px;line-height:1.6\"><strong>Félicitations pour ton admission</strong> au programme <strong>${titling}</strong> à l'Universidad Europea ! 🎉</p>\n<p style=\"margin:0 0 14px 0;font-size:16px;line-height:1.6\">Nous savons à quel point ce moment est important. Et nous voulons te faciliter la tâche : <strong>nous nous chargeons de toute la gestion de ton homologation</strong> pour que tu puisses te concentrer sur tes études.</p>\n<p style=\"margin:0 0 14px 0;font-size:16px;line-height:1.6\">Chez <em>Space for Edu</em>, nous avons accompagné des centaines d'étudiants internationaux. Notre équipe s'occupe de :</p>\n<ul style=\"margin:0 0 14px 22px;padding:0;font-size:16px;line-height:1.8\"><li style=\"margin:0 0 4px 0\">Vérifier et préparer tous tes documents.</li><li style=\"margin:0 0 4px 0\">Les soumettre à l'organisme compétent.</li><li style=\"margin:0 0 4px 0\">Te tenir informé à chaque étape.</li></ul>\n<p style=\"margin:0 0 6px 0;font-size:16px;line-height:1.6\"><strong>Des questions ? Écris-nous et nous te répondons en moins de 24 heures :</strong></p>\n${ctaButton}\n<p style=\"margin:0 0 14px 0;font-size:14px;line-height:1.6;color:#555;text-align:center\">Ou si tu préfères, écris-nous sur WhatsApp au <a href=\"https://wa.me/34635527594?text=${encodeURIComponent(`Bonjour, je suis ${firstName} et je souhaite des informations sur l'homologation pour ${titling}`)}\" style=\"color:#0b69ff;text-decoration:none\">+34 635 52 75 94</a></p>`,\n    closing: `<p style=\"margin:20px 0 2px 0;font-size:16px;line-height:1.6\">Cordialement,</p>`,\n    disclaimer: `Conformément à la Loi Organique 3/2018 et au Règlement (UE) 2016/679, les données personnelles seront traitées par ROSFORD SL. Droits : <a href=\"mailto:center@spaceforedu.com\" style=\"color:#0b69ff;text-decoration:none\">center@spaceforedu.com</a>. Réclamations : <a href=\"https://www.aepd.es\" style=\"color:#0b69ff;text-decoration:none\">www.aepd.es</a>.`\n  },\n  'Italiano': {\n    subject: `${firstName}, manca solo un passo per iniziare il tuo ${titling}`,\n    greeting: `Ciao ${firstName},`,\n    body: `<p style=\"margin:0 0 14px 0;font-size:16px;line-height:1.6\"><strong>Complimenti per la tua ammissione</strong> al programma <strong>${titling}</strong> all'Universidad Europea! 🎉</p>\n<p style=\"margin:0 0 14px 0;font-size:16px;line-height:1.6\">Sappiamo quanto sia importante questo momento. E vogliamo renderlo semplice: <strong>ci occupiamo noi di tutta la gestione della tua omologazione</strong> così tu puoi concentrarti su ciò che conta davvero — i tuoi studi.</p>\n<p style=\"margin:0 0 14px 0;font-size:16px;line-height:1.6\">A <em>Space for Edu</em> abbiamo già accompagnato centinaia di studenti internazionali come te. Il nostro team si occupa di:</p>\n<ul style=\"margin:0 0 14px 22px;padding:0;font-size:16px;line-height:1.8\"><li style=\"margin:0 0 4px 0\">Verificare e preparare tutta la tua documentazione.</li><li style=\"margin:0 0 4px 0\">Presentarla all'organismo competente.</li><li style=\"margin:0 0 4px 0\">Tenerti aggiornato ad ogni passo.</li></ul>\n<p style=\"margin:0 0 6px 0;font-size:16px;line-height:1.6\"><strong>Hai domande? Scrivici e ti rispondiamo entro 24 ore:</strong></p>\n${ctaButton}\n<p style=\"margin:0 0 14px 0;font-size:14px;line-height:1.6;color:#555;text-align:center\">Oppure scrivici su WhatsApp al <a href=\"https://wa.me/34635527594?text=${encodeURIComponent(`Ciao, sono ${firstName} e vorrei informazioni sull'omologazione per ${titling}`)}\" style=\"color:#0b69ff;text-decoration:none\">+34 635 52 75 94</a></p>`,\n    closing: `<p style=\"margin:20px 0 2px 0;font-size:16px;line-height:1.6\">Cordiali saluti,</p>`,\n    disclaimer: `Ai sensi della Legge Organica 3/2018 e del Regolamento (UE) 2016/679, i dati personali saranno trattati da ROSFORD SL. Diritti: <a href=\"mailto:center@spaceforedu.com\" style=\"color:#0b69ff;text-decoration:none\">center@spaceforedu.com</a>. Reclami: <a href=\"https://www.aepd.es\" style=\"color:#0b69ff;text-decoration:none\">www.aepd.es</a>.`\n  }\n};\n\nconst t = templates[lang];\nconst langCode = lang === 'Español' ? 'es' : lang === 'Francés' ? 'fr' : lang === 'Italiano' ? 'it' : 'en';\n\nconst bodyHtml = `<!doctype html>\n<html lang=\"${langCode}\">\n<head>\n  <meta charset=\"utf-8\">\n  <meta name=\"x-apple-disable-message-reformatting\">\n  <meta name=\"format-detection\" content=\"telephone=no, date=no, address=no, email=no\">\n</head>\n<body style=\"margin:0;padding:0;background:#f5f7fa\">\n<center style=\"width:100%;background:#f5f7fa\">\n  <table role=\"presentation\" cellspacing=\"0\" cellpadding=\"0\" border=\"0\" align=\"center\" width=\"100%\" style=\"max-width:600px;margin:0 auto;background:#ffffff\">\n    <!-- CUERPO -->\n    <tr>\n      <td style=\"padding:28px;font-family:Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#111\">\n        <p style=\"margin:0 0 14px 0;font-size:16px;line-height:1.5\">${t.greeting}</p>\n        ${t.body}\n        ${t.closing}\n      </td>\n    </tr>\n    <!-- FIRMA -->\n    <tr>\n      <td style=\"padding:0 28px 24px 28px;font-family:Segoe UI,Roboto,Helvetica,Arial,sans-serif\">\n        <table role=\"presentation\" cellspacing=\"0\" cellpadding=\"0\" border=\"0\" width=\"100%\">\n          <tr>\n            <td style=\"width:200px;vertical-align:top;padding-right:20px\">\n              <img src=\"https://spaceforedu.com/assets/SFE_Small_logo.jpg\" alt=\"Space for Edu\" width=\"160\" style=\"display:block;border:0\">\n            </td>\n            <td style=\"vertical-align:top\">\n              <table role=\"presentation\" cellspacing=\"0\" cellpadding=\"0\" border=\"0\" width=\"100%\" style=\"border:1px solid #e6e8eb;border-radius:12px\">\n                <tr>\n                  <td style=\"padding:16px 20px\">\n                    <p style=\"margin:0;font-size:18px;line-height:1.4;font-weight:700;color:#111\">Matvey Sinelnik</p>\n                    <p style=\"margin:2px 0 10px 0;font-size:14px;color:#555;line-height:1.4\">Director — Rosford SL</p>\n                    <p style=\"margin:0;font-size:14px;color:#111;line-height:1.7\">📞 <a href=\"tel:+34635527594\" style=\"color:#0b69ff;text-decoration:none\">(+34) 635 52 75 94</a><br>✉️ <a href=\"mailto:center@spaceforedu.com\" style=\"color:#0b69ff;text-decoration:none\">center@spaceforedu.com</a><br>🌐 <a href=\"https://www.spaceforedu.com\" style=\"color:#0b69ff;text-decoration:none\">www.spaceforedu.com</a></p>\n                  </td>\n                </tr>\n              </table>\n            </td>\n          </tr>\n        </table>\n      </td>\n    </tr>\n    <!-- LEGAL + TRACKING PIXEL -->\n    <tr>\n      <td style=\"padding:0 28px 28px 28px;font-family:Segoe UI,Roboto,Helvetica,Arial,sans-serif\">\n        <p style=\"margin:0;font-size:12px;line-height:1.6;color:#6b7280\">${t.disclaimer}</p>\n        ${trackingPixel}\n      </td>\n    </tr>\n  </table>\n</center>\n</body>\n</html>`;\n\nconst bodyText = bodyHtml.replace(/<[^>]+>/g, '').replace(/\\s+/g, ' ').trim();\n\nreturn [{\n  json: {\n    lead_id: lead.id,\n    email: lead.email,\n    first_name: firstName,\n    language: lang,\n    subject: t.subject,\n    body_html: bodyHtml,\n    body_text: bodyText,\n    idempotency_key: idempotencyKey\n  }\n}];"
+      },
+      "id": "52686922-c8c9-412a-8dbc-44beec6c333c",
+      "name": "Build Email HTML",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -304,
+        1456
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO email_messages (lead_id, campaign_type, subject, body_html, body_text, status, idempotency_key)\nVALUES (\n  '{{ $json.lead_id }}'::uuid,\n  'cold_email',\n  $n8nsubj${{ $json.subject }}$n8nsubj$,\n  $n8nhtml${{ $json.body_html }}$n8nhtml$,\n  $n8ntxt${{ $json.body_text }}$n8ntxt$,\n  'sending',\n  '{{ $json.idempotency_key }}'\n)\nON CONFLICT (idempotency_key) WHERE idempotency_key IS NOT NULL\nDO UPDATE SET\n  status = 'sending',\n  retry_count = CASE\n    WHEN email_messages.status = 'failed'\n    THEN email_messages.retry_count + 1\n    ELSE email_messages.retry_count\n  END,\n  subject = EXCLUDED.subject,\n  body_html = EXCLUDED.body_html,\n  body_text = EXCLUDED.body_text,\n  error_message = NULL,\n  updated_at = NOW()\nRETURNING id, retry_count;",
+        "options": {}
+      },
+      "id": "3342ee71-1cf0-40ef-804f-d8b02d2a1f31",
+      "name": "Upsert email_messages",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        -64,
+        1456
+      ],
+      "notesInFlow": false,
+      "credentials": {
+        "postgres": {
+          "id": "9YNkmOfiRiSlOmIT",
+          "name": "Postgres account 2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "cond-retry",
+              "leftValue": "={{ $json.retry_count }}",
+              "rightValue": "={{ Number(5) }}",
+              "operator": {
+                "type": "number",
+                "operation": "gte"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "ccbc020c-3b00-4a86-8ef5-f2e913bb53e6",
+      "name": "IF Max Retries",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        176,
+        1456
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE leads SET email_status = 'failed', updated_at = NOW() WHERE id = $1;\n\nUPDATE email_messages SET status = 'failed', error_message = 'Max retries exceeded', updated_at = NOW()\nWHERE lead_id = $1 AND campaign_type = 'cold_email';\n\nINSERT INTO email_events(email_message_id, lead_id, event_type, detail)\n  SELECT id, $1, 'max_retries', '{}'::jsonb\n  FROM email_messages WHERE lead_id = $1 AND campaign_type = 'cold_email';",
+        "options": {
+          "queryReplacement": "={{ $('Pick 1 Lead').first().json.id }}"
+        }
+      },
+      "id": "43c92cc5-0274-4752-a9d9-2b7308573fb9",
+      "name": "Mark Lead Failed (max retries)",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        416,
+        1552
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "9YNkmOfiRiSlOmIT",
+          "name": "Postgres account 2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "fromEmail": "center@spaceforedu.com",
+        "toEmail": "={{ $('Build Email HTML').first().json.email }}",
+        "subject": "={{ $('Build Email HTML').first().json.subject }}",
+        "html": "={{ $('Build Email HTML').first().json.body_html }}",
+        "options": {}
+      },
+      "id": "5cf4b43a-59c7-49d7-a842-84fa2dc22469",
+      "name": "Enviar Email SMTP",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [
+        416,
+        1360
+      ],
+      "webhookId": "49133a49-cbd5-45a4-a3e5-75ce624a27cf",
+      "credentials": {
+        "smtp": {
+          "id": "OtBbSI15u0Xq1dhQ",
+          "name": "SMTP account"
+        }
+      },
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- Mark message sent\nUPDATE email_messages SET status = 'sent', sent_at = NOW(), updated_at = NOW() WHERE id = $1;\n\n-- Mark lead sent\nUPDATE leads SET email_status = 'sent', last_email_sent_at = NOW(), updated_at = NOW() WHERE id = $2;\n\n-- Heartbeat\nUPDATE worker_locks SET heartbeat_at = NOW() WHERE lock_key = 'cold_email_worker' AND owner_id = $3;\n\n-- Audit\nINSERT INTO email_events(email_message_id, lead_id, event_type, detail) VALUES ($1, $2, 'sent', '{}'::jsonb);",
+        "options": {
+          "queryReplacement": "={{ $('Upsert email_messages').first().json.id }},   {{ $('Pick 1 Lead').first().json.id }},   {{ $('Generate Worker ID').first().json.worker_id }}"
+        }
+      },
+      "id": "04546f55-d7b8-44cb-8809-095fe6adee98",
+      "name": "Mark Sent + Audit",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        656,
+        1264
+      ],
+      "alwaysOutputData": true,
+      "credentials": {
+        "postgres": {
+          "id": "9YNkmOfiRiSlOmIT",
+          "name": "Postgres account 2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- Mark message failed\nUPDATE email_messages SET status = 'failed', error_message = $2, updated_at = NOW() WHERE id = $1;\n\n-- Requeue lead o marcar failed si max retries\nUPDATE leads\nSET email_status = CASE\n      WHEN (SELECT retry_count FROM email_messages WHERE id = $1) >= 5 THEN 'failed'\n      ELSE 'queued'\n    END,\n    updated_at = NOW()\nWHERE id = $3;\n\n-- Heartbeat\nUPDATE worker_locks SET heartbeat_at = NOW() WHERE lock_key = 'cold_email_worker' AND owner_id = $4;\n\n-- Audit\nINSERT INTO email_events(email_message_id, lead_id, event_type, detail)\nVALUES ($1, $3, 'failed', jsonb_build_object('error', $2));",
+        "options": {
+          "queryReplacement": "={{ $('Upsert email_messages').first().json.id }},   {{ $input.first().json.message || 'SMTP send failed' }},   {{ $('Pick 1 Lead').first().json.id }},   {{ $('Generate Worker ID').first().json.worker_id }}"
+        }
+      },
+      "id": "b75e2655-24a4-4e10-a285-4f8cae8481df",
+      "name": "Mark Failed + Requeue",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        656,
+        1472
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "9YNkmOfiRiSlOmIT",
+          "name": "Postgres account 2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE worker_locks SET heartbeat_at = NOW()\nWHERE lock_key = 'cold_email_worker'\n  AND owner_id = $1;",
+        "options": {
+          "queryReplacement": "={{ $('Generate Worker ID').first().json.worker_id }}"
+        }
+      },
+      "id": "32457110-f1b5-4978-b5a2-bd7725aa173e",
+      "name": "Heartbeat Lock",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        896,
+        1360
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "9YNkmOfiRiSlOmIT",
+          "name": "Postgres account 2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT EXISTS(\n  SELECT 1 FROM leads\n  WHERE email_status = 'queued'\n    AND email_valid = true\n    AND last_email_sent_at IS NULL\n    AND unsubscribed_at IS NULL\n) AS has_more;",
+        "options": {}
+      },
+      "id": "6992eebd-4edd-45d1-af1f-db6876f5632a",
+      "name": "Check More Queued",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        1136,
+        1360
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "9YNkmOfiRiSlOmIT",
+          "name": "Postgres account 2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "cond-more",
+              "leftValue": "={{ $json.has_more }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "f2be03b2-ac84-4e54-8680-f5fee783b08c",
+      "name": "IF More Queued",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        1376,
+        1360
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "DELETE FROM worker_locks WHERE lock_key = 'cold_email_worker' AND owner_id = $1;",
+        "options": {
+          "queryReplacement": "={{ $('Generate Worker ID').first().json.worker_id }}"
+        }
+      },
+      "id": "151a2249-a772-42ef-942e-6b557af4abce",
+      "name": "Release Lock FIN",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        1616,
+        1504
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "9YNkmOfiRiSlOmIT",
+          "name": "Postgres account 2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "={{ $workflow.id }}",
+          "cachedResultName": "={{ $workflow.id }}"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {},
+          "matchingColumns": [],
+          "schema": [],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": true
+        },
+        "options": {
+          "waitForSubWorkflow": false
+        }
+      },
+      "id": "97e5ae3c-e5af-4637-9c5b-f4cfb1ba4748",
+      "name": "Self-Call (next lead)",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.3,
+      "position": [
+        1856,
+        1504
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- Reset completo para re-testear\nDELETE FROM email_events\nWHERE lead_id IN (SELECT id FROM leads WHERE email = 'matveysinelnik@gmail.com');\n\nDELETE FROM email_messages\nWHERE lead_id IN (SELECT id FROM leads WHERE email = 'matveysinelnik@gmail.com');\n\nUPDATE leads\nSET email_status = 'queued',\n    last_email_sent_at = NULL,\n    updated_at = NOW()\nWHERE email = 'matveysinelnik@gmail.com';\n\nDELETE FROM worker_locks\nWHERE lock_key = 'cold_email_worker';",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        -2048,
+        1552
+      ],
+      "id": "bb3366b0-393b-46a6-b509-7f7a4eb3474c",
+      "name": "RETESTERErrase before launch",
+      "credentials": {
+        "postgres": {
+          "id": "9YNkmOfiRiSlOmIT",
+          "name": "Postgres account 2"
+        }
+      }
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Execute Workflow Trigger": {
+      "main": [
+        [
+          {
+            "node": "RETESTERErrase before launch",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Cron Backup L-V cada 2min": {
+      "main": [
+        [
+          {
+            "node": "RETESTERErrase before launch",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Generate Worker ID": {
+      "main": [
+        [
+          {
+            "node": "Acquire Persistent Lock",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Acquire Persistent Lock": {
+      "main": [
+        [
+          {
+            "node": "IF Got Lock",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF Got Lock": {
+      "main": [
+        [
+          {
+            "node": "FIN otro worker activo",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Reap Stale Leads",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Reap Stale Leads": {
+      "main": [
+        [
+          {
+            "node": "Pick 1 Lead",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Pick 1 Lead": {
+      "main": [
+        [
+          {
+            "node": "IF Lead Found",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF Lead Found": {
+      "main": [
+        [
+          {
+            "node": "Release Lock (no leads)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build Email HTML",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Email HTML": {
+      "main": [
+        [
+          {
+            "node": "Upsert email_messages",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Upsert email_messages": {
+      "main": [
+        [
+          {
+            "node": "IF Max Retries",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF Max Retries": {
+      "main": [
+        [
+          {
+            "node": "Mark Lead Failed (max retries)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Enviar Email SMTP",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Mark Lead Failed (max retries)": {
+      "main": [
+        [
+          {
+            "node": "Heartbeat Lock",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Enviar Email SMTP": {
+      "main": [
+        [
+          {
+            "node": "Mark Sent + Audit",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Mark Failed + Requeue",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Mark Sent + Audit": {
+      "main": [
+        [
+          {
+            "node": "Heartbeat Lock",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Mark Failed + Requeue": {
+      "main": [
+        [
+          {
+            "node": "Heartbeat Lock",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Heartbeat Lock": {
+      "main": [
+        [
+          {
+            "node": "Check More Queued",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check More Queued": {
+      "main": [
+        [
+          {
+            "node": "IF More Queued",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF More Queued": {
+      "main": [
+        [],
+        [
+          {
+            "node": "Release Lock FIN",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "RETESTERErrase before launch": {
+      "main": [
+        [
+          {
+            "node": "Generate Worker ID",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Release Lock FIN": {
+      "main": [
+        [
+          {
+            "node": "Self-Call (next lead)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": false
+  },
+  "versionId": "538e25db-99de-4d97-a555-791ac3e90ff6",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "592b623edb0f75bbdf9e23bd5053c4d11f27689a570b29e5f93da69dfd507f48"
+  },
+  "id": "iQZYQQiMwJ78ndcP",
+  "tags": [
+    {
+      "updatedAt": "2026-02-21T19:40:10.972Z",
+      "createdAt": "2026-02-21T19:40:10.972Z",
+      "id": "njDRa4helYpjjcLE",
+      "name": "CRM"
+    },
+    {
+      "updatedAt": "2026-02-21T19:40:10.966Z",
+      "createdAt": "2026-02-21T19:40:10.966Z",
+      "id": "GyahMw4wjpELPYPm",
+      "name": "Enterprise"
+    },
+    {
+      "updatedAt": "2026-02-21T19:40:10.944Z",
+      "createdAt": "2026-02-21T19:40:10.944Z",
+      "id": "blwKfhhNXADcFoec",
+      "name": "Email"
+    }
+  ]
+}

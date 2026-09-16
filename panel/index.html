@@ -1,0 +1,244 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>Panel · SpaceForEdu</title>
+<style>
+  /* Paleta validada con scripts/validate_palette.js de la skill dataviz.
+     Categoricos (4 slots) y rampa ordinal de 5 pasos, en claro y en oscuro:
+     todas las comprobaciones en PASS. Los dos colores que quedan por debajo
+     de 3:1 en claro (aqua y amarillo) llevan etiqueta numerica visible, que
+     es la compensacion que exige la regla de relieve. */
+  :root {
+    color-scheme: light;
+    --surface-0: #f4f3f0;
+    --surface-1: #fcfcfb;
+    --border:    #ddddd6;
+    --text-1:    #0b0b0b;
+    --text-2:    #52514e;
+    --text-3:    #78776f;
+
+    --c1: #2a78d6;  /* azul     */
+    --c2: #eb6834;  /* naranja  */
+    --c3: #1baf7a;  /* aqua     */
+    --c4: #eda100;  /* amarillo */
+
+    --o1: #86b6ef; --o2: #5598e7; --o3: #2a78d6; --o4: #1c5cab; --o5: #104281;
+
+    --bueno:   #0ca30c;
+    --aviso:   #fab219;
+    --critico: #d03b3b;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      color-scheme: dark;
+      --surface-0: #111110;
+      --surface-1: #1a1a19;
+      --border:    #383835;
+      --text-1:    #ffffff;
+      --text-2:    #c3c2b7;
+      --text-3:    #97968c;
+      --c1: #3987e5; --c2: #d95926; --c3: #199e70; --c4: #c98500;
+      --o1: #184f95; --o2: #1c5cab; --o3: #2a78d6; --o4: #3987e5; --o5: #5598e7;
+    }
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --surface-0: #111110;
+    --surface-1: #1a1a19;
+    --border:    #383835;
+    --text-1:    #ffffff;
+    --text-2:    #c3c2b7;
+    --text-3:    #97968c;
+    --c1: #3987e5; --c2: #d95926; --c3: #199e70; --c4: #c98500;
+    --o1: #184f95; --o2: #1c5cab; --o3: #2a78d6; --o4: #3987e5; --o5: #5598e7;
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding-block: 28px;
+    padding-inline: 20px;
+    background: var(--surface-0);
+    color: var(--text-1);
+    font: 15px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+    font-variant-numeric: tabular-nums;
+  }
+  .envoltorio { max-width: 1000px; margin: 0 auto; display: grid; gap: 22px; }
+
+  header { display: flex; flex-wrap: wrap; gap: 10px; align-items: baseline; justify-content: space-between; }
+  h1 { margin: 0; font-size: 21px; font-weight: 600; letter-spacing: -0.01em; }
+  .sello { color: var(--text-3); font-size: 13px; }
+
+  .tarjeta {
+    background: var(--surface-1);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 18px;
+  }
+  h2 {
+    margin: 0 0 14px;
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: 0.07em;
+    text-transform: uppercase;
+    color: var(--text-3);
+  }
+
+  /* --- fila de cifras --- */
+  .cifras { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 14px; }
+  .cifra { background: var(--surface-1); border: 1px solid var(--border); border-radius: 10px; padding: 16px; }
+  .cifra .n { font-size: 30px; font-weight: 600; line-height: 1.1; letter-spacing: -0.02em; }
+  .cifra .et { margin-top: 4px; font-size: 13px; color: var(--text-2); }
+  .cifra .nota { margin-top: 2px; font-size: 12px; color: var(--text-3); }
+
+  /* --- barras --- */
+  .barras { display: grid; gap: 9px; }
+  .fila { display: grid; grid-template-columns: 132px 1fr auto; gap: 12px; align-items: center; }
+  .fila .nombre { font-size: 13px; color: var(--text-2); }
+  .pista { background: var(--surface-0); border-radius: 4px; height: 20px; overflow: hidden; }
+  .relleno { height: 100%; border-radius: 0 4px 4px 0; min-width: 2px; }
+  .fila .valor { font-size: 13px; font-weight: 600; min-width: 3ch; text-align: right; }
+
+  table { border-collapse: collapse; width: 100%; font-size: 14px; }
+  th, td { text-align: right; padding: 8px 10px; border-bottom: 1px solid var(--border); }
+  th:first-child, td:first-child { text-align: left; }
+  th { font-size: 12px; font-weight: 600; color: var(--text-3); text-transform: uppercase; letter-spacing: 0.05em; }
+  tbody tr:last-child td { border-bottom: none; }
+  .punto { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 7px; vertical-align: baseline; }
+
+  .aviso { padding: 14px 16px; border-radius: 8px; font-size: 14px; border: 1px solid var(--border); background: var(--surface-1); }
+  .aviso.malo { border-color: var(--critico); }
+  .vacio { color: var(--text-3); font-size: 14px; }
+  footer { color: var(--text-3); font-size: 12px; padding-bottom: 8px; }
+  @media (max-width: 520px) { .fila { grid-template-columns: 96px 1fr auto; } }
+</style>
+</head>
+<body>
+<div class="envoltorio">
+  <header>
+    <h1>Embudo de SpaceForEdu</h1>
+    <span class="sello" id="sello">cargando…</span>
+  </header>
+  <div id="panel"><p class="vacio">Pidiendo datos…</p></div>
+  <footer>
+    Datos en vivo de PostgreSQL vía WF-08. Esta página no guarda nada.
+  </footer>
+</div>
+
+<script>
+// La ruta es relativa: el panel y la API van detras del mismo basic_auth de
+// Caddy, asi que no hay token que exponer en el navegador ni origen cruzado
+// que permitir. Si se separan, esto es lo unico que hay que cambiar.
+const API = "../webhook/panel-kpis";
+
+const ETIQUETAS_EMBUDO = {
+  h500: "Homologación 500 €",
+  c100: "Consulta 100 €",
+  nl:   "Solo newsletter",
+  qual: "Por cualificar",
+  sin_segmentar: "Sin segmentar",
+};
+const COLOR_EMBUDO = { h500: "var(--c1)", c100: "var(--c2)", nl: "var(--c3)", qual: "var(--c4)", sin_segmentar: "var(--text-3)" };
+
+const ETIQUETAS_PASO = {
+  "0": "Correo inicial", "1": "Guía (día 3)", "2": "WhatsApp (día 6)",
+  "3": "Cierre (día 10)", "4": "Despedida (día 14)",
+};
+const COLOR_PASO = ["var(--o1)","var(--o2)","var(--o3)","var(--o4)","var(--o5)"];
+
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;" }[c]));
+const num = (n) => new Intl.NumberFormat("es-ES").format(n);
+const eur = (n) => new Intl.NumberFormat("es-ES", { style:"currency", currency:"EUR", maximumFractionDigits:0 }).format(n);
+
+function barras(datos, etiquetas, color) {
+  const pares = Object.entries(datos || {});
+  if (!pares.length) return '<p class="vacio">Todavía no hay datos.</p>';
+  const max = Math.max(...pares.map(([, v]) => v), 1);
+  return '<div class="barras">' + pares.map(([k, v], i) => {
+    const c = typeof color === "function" ? color(k, i) : color;
+    // La etiqueta numerica va SIEMPRE visible: es la compensacion que exige
+    // la regla de relieve para los colores por debajo de 3:1 en claro, y
+    // ademas evita tener que estimar longitudes a ojo.
+    return `<div class="fila">
+      <span class="nombre">${esc(etiquetas[k] || k)}</span>
+      <div class="pista"><div class="relleno" style="width:${(v / max) * 100}%;background:${c}"></div></div>
+      <span class="valor">${num(v)}</span>
+    </div>`;
+  }).join("") + "</div>";
+}
+
+function pintar(d) {
+  const r = d.reacciones || {}, ing = d.ingresos || {};
+  const ab = (d.ab_guias || []);
+  const tasaAb = (f) => f.leads ? ((f.pagaron / f.leads) * 100).toFixed(1) + " %" : "—";
+
+  document.getElementById("sello").textContent =
+    "actualizado " + new Date(d.generado_at).toLocaleString("es-ES");
+
+  document.getElementById("panel").innerHTML = `
+    <div class="cifras">
+      <div class="cifra"><div class="n">${eur(ing.total_eur || 0)}</div>
+        <div class="et">Ingresos totales</div>
+        <div class="nota">${eur(ing.mes_eur || 0)} este mes</div></div>
+      <div class="cifra"><div class="n">${num(r.clientes || 0)}</div>
+        <div class="et">Clientes</div></div>
+      <div class="cifra"><div class="n">${num(r.contestaron || 0)}</div>
+        <div class="et">Contestaron</div></div>
+      <div class="cifra"><div class="n" style="color:${(r.bajas || 0) > 0 ? "var(--critico)" : "inherit"}">${num(r.bajas || 0)}</div>
+        <div class="et">Bajas</div>
+        <div class="nota">Si sube, la secuencia molesta</div></div>
+    </div>
+
+    <div class="tarjeta">
+      <h2>Reparto por embudo</h2>
+      ${barras(d.embudo, ETIQUETAS_EMBUDO, (k) => COLOR_EMBUDO[k] || "var(--text-3)")}
+    </div>
+
+    <div class="tarjeta">
+      <h2>Dónde está cada uno de la secuencia</h2>
+      ${barras(d.secuencia, ETIQUETAS_PASO, (k) => COLOR_PASO[Number(k)] || "var(--o3)")}
+    </div>
+
+    <div class="tarjeta">
+      <h2>Guías: web contra PDF</h2>
+      ${ab.length ? `<table>
+        <thead><tr><th>Variante</th><th>Leads</th><th>Pagaron</th><th>Conversión</th></tr></thead>
+        <tbody>${ab.map((f, i) => `<tr>
+          <td><span class="punto" style="background:${i === 0 ? "var(--c1)" : "var(--c2)"}"></span>${esc(f.variante)}</td>
+          <td>${num(f.leads)}</td><td>${num(f.pagaron)}</td><td>${tasaAb(f)}</td>
+        </tr>`).join("")}</tbody></table>
+        <p class="nota" style="margin:10px 0 0;color:var(--text-3);font-size:12px">
+          La columna que decide es «Conversión», no los clics.</p>`
+        : '<p class="vacio">Sin variantes asignadas todavía.</p>'}
+    </div>
+
+    <div class="tarjeta">
+      <h2>Cola de WhatsApp</h2>
+      ${barras(d.whatsapp, { pendiente:"Pendientes", enviada:"Enviadas", sin_telefono:"Sin teléfono", descartada:"Descartadas" },
+               (k) => k === "pendiente" ? "var(--aviso)" : k === "enviada" ? "var(--bueno)" : "var(--text-3)")}
+    </div>
+
+    <div class="tarjeta">
+      <h2>Idiomas</h2>
+      ${barras(d.idiomas, {}, "var(--c1)")}
+    </div>`;
+}
+
+fetch(API, { credentials: "same-origin" })
+  .then((r) => { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
+  .then((j) => pintar(Array.isArray(j) ? (j[0].panel || j[0]) : (j.panel || j)))
+  .catch((e) => {
+    // Decir qué ha fallado y dónde mirar, en vez de dejar la página en blanco.
+    document.getElementById("sello").textContent = "sin datos";
+    document.getElementById("panel").innerHTML =
+      `<div class="aviso malo"><strong>No se han podido cargar los datos.</strong><br>
+       ${esc(e.message)}<br><br>
+       Comprueba que WF-08 está activo en n8n y que la ruta <code>${esc(API)}</code>
+       responde desde este mismo dominio.</div>`;
+  });
+</script>
+</body>
+</html>

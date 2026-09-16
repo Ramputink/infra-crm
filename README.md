@@ -1,5 +1,9 @@
 # 🚀 Infraestructura Automatización CRM — n8n + PostgreSQL + Docker + VPS
 
+> **Puesta en marcha del embudo:** las migraciones y los workflows WF-04, WF-05 y WF-06 se
+> despliegan siguiendo [DESPLIEGUE.md](DESPLIEGUE.md), que dice qué ejecutar, en qué orden y
+> qué hace falta configurar a mano.
+
 ## 📌 Descripción General
 
 Esta infraestructura implementa un entorno de producción para automatización de CRM orientado a:

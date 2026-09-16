@@ -1,0 +1,201 @@
+{
+  "name": "WF-05: Secuencia (estado; el envio lo hace enviar_secuencia.py)",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 10 * * 1-5"
+            }
+          ]
+        }
+      },
+      "id": "wf05-cron",
+      "name": "Cada dia a las 10",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        0
+      ],
+      "notes": "Solo laborables: un correo comercial en sabado se lee peor y se marca como spam mas.",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {},
+      "id": "wf05-manual",
+      "name": "Ejecutar a mano",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- Detiene la secuencia de quien ha contestado, se ha dado de baja o ha\n-- pasado a solo-newsletter.\n--\n-- Va ANTES de repartir los toques del dia, no despues: si alguien contesto\n-- anoche, lo que no puede pasar es que esta misma pasada le escriba igual.\nUPDATE leads\nSET secuencia_proximo_at = NULL,\n    secuencia_fin_at     = COALESCE(secuencia_fin_at, NOW())\nWHERE secuencia_proximo_at IS NOT NULL\n  AND (replied_at IS NOT NULL\n       OR unsubscribed_at IS NOT NULL\n       OR embudo = 'nl')\nRETURNING id, replied_at IS NOT NULL AS contesto,\n          unsubscribed_at IS NOT NULL AS se_dio_de_baja;",
+        "options": {}
+      },
+      "id": "wf05-parar-a-quien-ya-no-to",
+      "name": "Parar a quien ya no toca",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        220,
+        100
+      ],
+      "notes": "Va ANTES de repartir: quien contesto anoche no debe recibir el toque de hoy.",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- Arranca la secuencia de quien ya recibio el correo inicial.\n--\n-- WF-02 marca `last_email_sent_at` pero no fija cuando toca el siguiente\n-- toque: no sabe que existe una secuencia. Sin esto, todo el que recibio el\n-- primer correo se queda parado para siempre.\nUPDATE leads\nSET secuencia_proximo_at = last_email_sent_at + (sfe_dias_hasta_paso(1) || ' days')::interval,\n    variante_guia        = COALESCE(variante_guia, sfe_variante_ab(id))\nWHERE email_status = 'sent'\n  AND secuencia_paso = 0\n  AND secuencia_proximo_at IS NULL\n  AND last_email_sent_at IS NOT NULL\n  AND replied_at IS NULL\n  AND unsubscribed_at IS NULL\n  AND embudo IN ('h500','c100','qual')\nRETURNING id;",
+        "options": {}
+      },
+      "id": "wf05-arrancar-secuencia",
+      "name": "Arrancar secuencia",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        440,
+        100
+      ],
+      "notes": "WF-02 no fija la fecha del siguiente toque; sin esto la secuencia no empieza nunca.",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- Los que les toca hoy, con todo lo que necesitan las plantillas.\n--\n-- FOR UPDATE SKIP LOCKED por el mismo motivo que en WF-02: si dos pasadas se\n-- solapan, la segunda salta las filas que la primera esta tratando en vez de\n-- duplicar el toque.\nSELECT l.id, l.email, l.first_name, l.full_name, l.language, l.country,\n       l.titling, l.phone, l.embudo, l.idioma_comunicacion, l.variante_guia,\n       l.secuencia_paso + 1 AS paso_a_dar\nFROM leads l\nWHERE l.secuencia_proximo_at IS NOT NULL\n  AND l.secuencia_proximo_at <= NOW()\n  AND l.replied_at IS NULL\n  AND l.unsubscribed_at IS NULL\n  AND l.email_valid = true\n  AND l.secuencia_paso < 4\nORDER BY l.secuencia_proximo_at ASC\nLIMIT 200\nFOR UPDATE SKIP LOCKED;",
+        "options": {}
+      },
+      "id": "wf05-los-que-tocan-hoy",
+      "name": "Los que tocan hoy",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        660,
+        100
+      ],
+      "disabled": true,
+      "notes": "DESACTIVADO. Lo hace enviar_secuencia.py, en Python. WF-05 no tenia nodo de envio: agendaba los toques y los avanzaba sin mandar nada. Anadirle un emailSend habria obligado a reconstruir en JavaScript el guardarrail de la tasa, el pie del art. 14 RGPD, la baja del art. 21.2 LSSI, las cabeceras List-Unsubscribe y los textos en cinco idiomas, que ya existen en Python y costaron varios arreglos. Dos copias de eso se separan seguro. Para que no haya dos sistemas escribiendo el mismo estado, el ciclo entero vive alli y estos nodos quedan apagados.",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- Paso 2: WhatsApp. El alta en Cloud API sigue pendiente, asi que en vez de\n-- bloquear la secuencia entera se deja la tarea en cola. Se puede trabajar a\n-- mano desde hoy, y cuando exista WF-07 bastara con que la consuma.\n--\n-- Sin telefono no hay tarea que hacer: se marca asi para no dejar basura\n-- 'pendiente' que nadie podra cerrar nunca.\nINSERT INTO tareas_whatsapp (lead_id, telefono, idioma, mensaje, estado)\nSELECT l.id, l.phone, l.idioma_comunicacion,\n       'Toque del dia 6: no ha contestado al correo ni a la guia.',\n       CASE WHEN COALESCE(btrim(l.phone), '') = '' THEN 'sin_telefono' ELSE 'pendiente' END\nFROM leads l\nWHERE l.id = ANY($1::uuid[])\nON CONFLICT DO NOTHING\nRETURNING id, estado;",
+        "options": {}
+      },
+      "id": "wf05-encolar-whatsapp",
+      "name": "Encolar WhatsApp",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        880,
+        220
+      ],
+      "notes": "DESACTIVADO. Lo hace enviar_secuencia.py, en Python. WF-05 no tenia nodo de envio: agendaba los toques y los avanzaba sin mandar nada. Anadirle un emailSend habria obligado a reconstruir en JavaScript el guardarrail de la tasa, el pie del art. 14 RGPD, la baja del art. 21.2 LSSI, las cabeceras List-Unsubscribe y los textos en cinco idiomas, que ya existen en Python y costaron varios arreglos. Dos copias de eso se separan seguro. Para que no haya dos sistemas escribiendo el mismo estado, el ciclo entero vive alli y estos nodos quedan apagados.",
+      "notesInFlow": true,
+      "disabled": true
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- Avanza el paso y fija la fecha del siguiente.\n--\n-- Se hace en una sola sentencia y al final: si el envio fallo, el paso no\n-- avanza y el lead vuelve a salir en la proxima pasada. Es preferible repetir\n-- un toque que saltarselo en silencio.\nUPDATE leads\nSET secuencia_paso       = secuencia_paso + 1,\n    secuencia_proximo_at = CASE\n      WHEN sfe_dias_hasta_paso(secuencia_paso + 2) IS NULL THEN NULL\n      ELSE last_email_sent_at + (sfe_dias_hasta_paso(secuencia_paso + 2) || ' days')::interval\n    END,\n    secuencia_fin_at = CASE\n      WHEN secuencia_paso + 1 >= 4 THEN NOW() ELSE secuencia_fin_at\n    END,\n    email_status = CASE\n      WHEN secuencia_paso + 1 >= 4 THEN 'no_respuesta' ELSE email_status\n    END,\n    updated_at = NOW()\nWHERE id = ANY($1::uuid[])\nRETURNING id, secuencia_paso, secuencia_proximo_at;",
+        "options": {}
+      },
+      "id": "wf05-avanzar-paso",
+      "name": "Avanzar paso",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        1100,
+        100
+      ],
+      "notes": "DESACTIVADO. Lo hace enviar_secuencia.py, en Python. WF-05 no tenia nodo de envio: agendaba los toques y los avanzaba sin mandar nada. Anadirle un emailSend habria obligado a reconstruir en JavaScript el guardarrail de la tasa, el pie del art. 14 RGPD, la baja del art. 21.2 LSSI, las cabeceras List-Unsubscribe y los textos en cinco idiomas, que ya existen en Python y costaron varios arreglos. Dos copias de eso se separan seguro. Para que no haya dos sistemas escribiendo el mismo estado, el ciclo entero vive alli y estos nodos quedan apagados.",
+      "notesInFlow": true,
+      "disabled": true
+    }
+  ],
+  "connections": {
+    "Cada dia a las 10": {
+      "main": [
+        [
+          {
+            "node": "Parar a quien ya no toca",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ejecutar a mano": {
+      "main": [
+        [
+          {
+            "node": "Parar a quien ya no toca",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parar a quien ya no toca": {
+      "main": [
+        [
+          {
+            "node": "Arrancar secuencia",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Arrancar secuencia": {
+      "main": [
+        [
+          {
+            "node": "Los que tocan hoy",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Los que tocan hoy": {
+      "main": [
+        [
+          {
+            "node": "Encolar WhatsApp",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Encolar WhatsApp": {
+      "main": [
+        [
+          {
+            "node": "Avanzar paso",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {},
+  "meta": {
+    "templateCredsSetupCompleted": false
+  }
+}

@@ -1,0 +1,112 @@
+{
+  "name": "WF-04: Segmentador",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "*/15 8-22 * * *"
+            }
+          ]
+        }
+      },
+      "id": "wf04-cron",
+      "name": "Cada 15 min",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        0
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "wf04-manual",
+      "name": "Ejecutar a mano",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- Segmenta los leads que aun no lo estan.\n--\n-- Toda la logica vive en las funciones de migrations/002_segmentacion.sql, que\n-- son la version canonica y estan cruzadas contra segmentacion.py sobre los 934\n-- leads reales: cero discrepancias. Aqui no se replica nada.\n--\n-- Una sola sentencia: o se segmenta el lote entero o no se segmenta nada. Sin\n-- estados a medias si el workflow se corta.\nWITH segmentados AS (\n  UPDATE leads\n  SET embudo              = sfe_clasificar_embudo(tipo_producto, country),\n      idioma_comunicacion = sfe_inferir_idioma(language, country),\n      segmentado_at       = NOW()\n  WHERE segmentado_at IS NULL\n  RETURNING embudo\n)\nSELECT\n  COUNT(*)                                        AS total,\n  COUNT(*) FILTER (WHERE embudo = 'h500')         AS homologacion_500,\n  COUNT(*) FILTER (WHERE embudo = 'c100')         AS consulta_100,\n  COUNT(*) FILTER (WHERE embudo = 'nl')           AS solo_newsletter,\n  COUNT(*) FILTER (WHERE embudo = 'qual')         AS a_cualificar\nFROM segmentados;",
+        "options": {}
+      },
+      "id": "wf04-segmentar",
+      "name": "Segmentar pendientes",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        220,
+        100
+      ],
+      "notes": "La logica esta en las funciones sfe_* de migrations/002_segmentacion.sql, no aqui.",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- Los nacidos en Espana NO entran en la secuencia comercial.\n--\n-- Ya tienen el titulo espanol: no hay nada que homologar, asi que escribirles\n-- para venderles una homologacion es a la vez inutil y danino para la marca.\n-- Solo newsletter, y eso exige su consentimiento del art. 21 LSSI aparte.\n--\n-- Se sacan de la cola de envio aqui, no en el remitente, porque el remitente ya\n-- esta corriendo y no deberia tener que saber de segmentacion.\nUPDATE leads\nSET email_status = 'excluded_newsletter'\nWHERE embudo = 'nl'\n  AND email_status IN ('new', 'queued')\n  AND last_email_sent_at IS NULL\nRETURNING id;",
+        "options": {}
+      },
+      "id": "wf04-excluir",
+      "name": "Sacar de la cola a los nacidos en Espana",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        440,
+        100
+      ],
+      "notes": "Nacido en Espana = nada que homologar. Solo newsletter.",
+      "notesInFlow": true
+    }
+  ],
+  "connections": {
+    "Cada 15 min": {
+      "main": [
+        [
+          {
+            "node": "Segmentar pendientes",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ejecutar a mano": {
+      "main": [
+        [
+          {
+            "node": "Segmentar pendientes",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Segmentar pendientes": {
+      "main": [
+        [
+          {
+            "node": "Sacar de la cola a los nacidos en Espana",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {},
+  "meta": {
+    "templateCredsSetupCompleted": false
+  }
+}

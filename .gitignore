@@ -1,10 +1,39 @@
+# --- Credenciales ---
 .env
+.env.*
+!.env.example
 secrets/
+*.pem
+*.key
+id_rsa*
+*.ppk
+
+# --- Datos de leads: personas reales. Nunca al repositorio ---
+# El sistema entero existe para ingerir Excels de alumnos, y nada impedia que
+# un `git add .` en la raiz subiera una lista real de contactos.
+*.xlsx
+*.xls
+*.csv
+*.tsv
+
+# --- Volumenes y copias ---
 volumes/
 n8n_data/
 postgres_data/
 system_backups/
+backups/
 *.log
-*.sql
 *.tar.gz
+
+# Volcados de pg_dump: llevan datos reales de leads. Fuera del repositorio.
+*.sql
+# ...pero las migraciones SI se versionan: son esquema, no datos, y sin ellas
+# los workflows no funcionan. Esta excepcion existe porque la regla `*.sql` de
+# arriba se las trago en silencio -- `git add -A` no avisa de lo ignorado, y
+# tres commits salieron con los JSON pero sin el SQL que los hace funcionar.
+!migrations/
+!migrations/*.sql
+
+# --- Ruido ---
 node_modules/
+.DS_Store

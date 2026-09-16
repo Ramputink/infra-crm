@@ -1,4 +1,61 @@
 {$DOMAIN_N8N} {
   encode gzip
+
+  # --- Formularios de n8n: autenticacion obligatoria ---------------------
+  #
+  # El Form Trigger de workflow1 no lleva `authentication`, y su webhookId
+  # esta publicado en el repositorio junto con el dominio. En n8n la URL de un
+  # formulario es https://<dominio>/form/<webhookId>, asi que quedaba abierto:
+  # cualquiera podia subir un .xlsx que entra en `leads` y dispara
+  # ColdEmailSender, es decir, envio real desde la cuenta corporativa.
+  #
+  # Esto lo cierra en el proxy, que protege TODOS los formularios de golpe y
+  # no depende de tocar cada workflow uno a uno.
+  #
+  # Las credenciales NO viven aqui: salen del entorno, y el .env esta
+  # ignorado por git. Para generar el hash:
+  #
+  #     docker compose run --rm caddy caddy hash-password
+  #
+  # y poner en el .env (la contrasena en claro no se guarda en ningun sitio):
+  #
+  #     FORM_USER=rosford
+  #     FORM_PASSWORD_HASH=$2a$14$...
+  #
+  # OJO: en el .env el hash debe llevar los `$` DUPLICADOS ($$2a$$14$$...),
+  # porque docker compose interpreta `$` como inicio de variable. Es el error
+  # clasico que deja el hash roto y la autenticacion siempre fallando.
+  #
+  # MODO DE FALLO, a proposito: la sustitucion {$VAR} ocurre ANTES de parsear
+  # el Caddyfile. Si estas dos variables faltan, el bloque queda vacio y Caddy
+  # NO ARRANCA. Es deliberado: para un control de seguridad, mejor caido que
+  # abierto. Si n8n deja de responder tras desplegar esto, mira el .env antes
+  # que ninguna otra cosa.
+  # El panel y su API van detras de la MISMA autenticacion: los KPIs son PII
+  # agregada -- cuanta gente, de donde y cuanto paga -- y no pueden quedar
+  # abiertos. Al compartir origen, el navegador manda la credencial sola y no
+  # hace falta ningun token en el bundle.
+  @formularios path /form/* /form-test/* /form-waiting/* /panel* /webhook/panel-kpis
+  basic_auth @formularios {
+    {$FORM_USER} {$FORM_PASSWORD_HASH}
+  }
+
+  # --- Cabeceras de seguridad -------------------------------------------
+  # El panel de n8n no tiene por que ser incrustable ni rastreable.
+  header {
+    X-Frame-Options "SAMEORIGIN"
+    X-Content-Type-Options "nosniff"
+    Referrer-Policy "strict-origin-when-cross-origin"
+    Strict-Transport-Security "max-age=31536000; includeSubDomains"
+    X-Robots-Tag "noindex, nofollow"
+    -Server
+  }
+
+  # El panel es estatico y se sirve desde disco; el resto va a n8n.
+  handle_path /panel* {
+    root * /srv/panel
+    file_server
+  }
+
   reverse_proxy n8n:5678
 }

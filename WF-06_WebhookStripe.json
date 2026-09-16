@@ -1,0 +1,89 @@
+{
+  "name": "WF-06: Webhook de Stripe",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "stripe-pagos",
+        "responseMode": "lastNode",
+        "options": {
+          "rawBody": true
+        }
+      },
+      "id": "wf06-webhook",
+      "name": "Webhook de Stripe",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        0
+      ],
+      "webhookId": "PENDIENTE-GENERAR-AL-IMPORTAR",
+      "notes": "Raw Body ACTIVADO: la firma se calcula sobre el cuerpo crudo. Si se usa el JSON reserializado, el HMAC no coincide y se rechaza todo pago legitimo.",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// Verificacion de la firma de Stripe.\n//\n// POR QUE ESTO NO ES OPCIONAL\n// ---------------------------\n// Un webhook es una URL publica que acepta POST. Sin verificar la firma,\n// cualquiera que la descubra puede mandar un `checkout.session.completed`\n// inventado y marcar leads como pagados: contabilidad falseada, secuencias\n// detenidas para gente que no ha pagado, y metricas de embudo inservibles.\n//\n// Se verifica segun el esquema de Stripe: HMAC-SHA256 de \"<t>.<cuerpo crudo>\"\n// con el signing secret, comparado en tiempo constante, mas una tolerancia de\n// tiempo que impide reutilizar una peticion legitima capturada (replay).\n\nconst crypto = require('crypto');\n\nconst secreto = $env.STRIPE_WEBHOOK_SECRET;\nif (!secreto) {\n  // Fallar aqui y no dejar pasar: sin secreto no hay verificacion posible, y\n  // un webhook sin verificar es peor que un webhook caido.\n  throw new Error(\n    'Falta STRIPE_WEBHOOK_SECRET en el entorno de n8n. Sin el no se puede ' +\n    'verificar la firma, y se aceptarian pagos inventados.'\n  );\n}\n\nconst entrada = $input.first();\n\n// EL CUERPO TIENE QUE SER EL CRUDO, byte a byte.\n// Si se usa el JSON ya parseado y se vuelve a serializar, el orden de las\n// claves y los espacios cambian, el HMAC no coincide y TODO pago legitimo se\n// rechaza. Por eso el nodo Webhook lleva `rawBody: true`.\nconst bin = entrada.binary && entrada.binary.data;\nif (!bin) {\n  throw new Error(\n    'No hay cuerpo crudo. El nodo Webhook necesita la opcion \"Raw Body\" ' +\n    'activada; sin ella la firma nunca va a validar.'\n  );\n}\nconst cuerpoCrudo = Buffer.from(bin.data, 'base64').toString('utf8');\n\nconst cabecera = entrada.json.headers['stripe-signature'] || '';\nconst partes = Object.fromEntries(\n  cabecera.split(',').map((p) => p.split('=', 2)).filter((p) => p.length === 2)\n);\nconst marca = partes.t;\nif (!marca) throw new Error('Cabecera Stripe-Signature sin marca de tiempo.');\n\n// Tolerancia de 5 minutos, la que recomienda Stripe. Sin esto, una peticion\n// legitima capturada se puede reenviar indefinidamente.\nconst edad = Math.abs(Math.floor(Date.now() / 1000) - parseInt(marca, 10));\nif (edad > 300) {\n  throw new Error(`Peticion demasiado antigua (${edad} s). Posible replay.`);\n}\n\nconst esperado = crypto\n  .createHmac('sha256', secreto)\n  .update(`${marca}.${cuerpoCrudo}`, 'utf8')\n  .digest('hex');\n\n// Puede venir mas de una v1 durante una rotacion de secreto: vale con que una\n// case. La comparacion es en tiempo constante; una comparacion normal filtra\n// la firma byte a byte por el tiempo de respuesta.\nconst firmas = cabecera\n  .split(',')\n  .map((p) => p.split('=', 2))\n  .filter((p) => p[0] === 'v1')\n  .map((p) => p[1]);\n\nconst bufEsperado = Buffer.from(esperado, 'hex');\nconst valida = firmas.some((f) => {\n  const b = Buffer.from(f, 'hex');\n  return b.length === bufEsperado.length && crypto.timingSafeEqual(b, bufEsperado);\n});\n\nif (!valida) throw new Error('Firma de Stripe invalida. Peticion descartada.');\n\nconst evento = JSON.parse(cuerpoCrudo);\nconst sesion = evento.data && evento.data.object ? evento.data.object : {};\n\nreturn [{\n  json: {\n    event_id:     evento.id,\n    tipo:         evento.type,\n    lead_id:      sesion.client_reference_id || null,\n    importe_cent: sesion.amount_total != null ? sesion.amount_total : null,\n    moneda:       sesion.currency || null,\n    email_pago:   (sesion.customer_details && sesion.customer_details.email) || null,\n    payload:      JSON.stringify(evento),\n  },\n}];"
+      },
+      "id": "wf06-verificar",
+      "name": "Verificar firma",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        220,
+        0
+      ],
+      "notes": "Sin esto cualquiera que descubra la URL puede fingir un pago.",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- Guarda el evento y, si trae lead, marca el cobro.\n--\n-- ON CONFLICT DO NOTHING sobre event_id: Stripe REINTENTA los webhooks, y sin\n-- esto el mismo cobro se contaria varias veces. La unicidad la garantiza la\n-- base, no el workflow, que es donde tiene que estar.\nWITH nuevo AS (\n  INSERT INTO stripe_eventos (event_id, tipo, lead_id, importe_cent, moneda, email_pago, payload)\n  VALUES ($1, $2, NULLIF($3,'')::uuid, $4::bigint, $5, $6, $7::jsonb)\n  ON CONFLICT (event_id) DO NOTHING\n  RETURNING event_id, lead_id, importe_cent\n),\ncobrado AS (\n  -- Solo se toca el lead si el evento era NUEVO: si fue un reintento, `nuevo`\n  -- viene vacio y aqui no se hace nada.\n  UPDATE leads l\n  SET pagado_at = COALESCE(l.pagado_at, NOW()),\n\n      -- El importe se ACUMULA, no se pisa. Hay dos rutas de compra: 500 EUR\n      -- de una vez, o 100 EUR de consulta y 400 EUR despues. Si el segundo\n      -- cobro sobreescribiera al primero, quien pago por la ruta larga\n      -- figuraria como un cliente de 400 EUR y se perderia que completo la\n      -- homologacion.\n      importe_cent = COALESCE(l.importe_cent, 0) + n.importe_cent,\n\n      -- Y el producto sale del TOTAL acumulado: 100 + 400 = 500 es una\n      -- homologacion completa, igual que pagarla de una vez.\n      producto = sfe_producto_por_importe(COALESCE(l.importe_cent, 0) + n.importe_cent),\n\n      email_status = 'cliente',\n      -- Un cliente deja de ser un lead al que perseguir. Parar la secuencia\n      -- aqui evita el peor correo posible: el de cierre a quien ya ha pagado.\n      secuencia_proximo_at = NULL,\n      secuencia_fin_at     = COALESCE(l.secuencia_fin_at, NOW()),\n      updated_at           = NOW()\n  FROM nuevo n\n  WHERE l.id = n.lead_id\n  RETURNING l.id, l.producto, l.importe_cent\n)\nSELECT\n  (SELECT COUNT(*) FROM nuevo)   AS evento_nuevo,\n  (SELECT COUNT(*) FROM cobrado) AS lead_marcado,\n  (SELECT producto FROM cobrado LIMIT 1) AS producto,\n  (SELECT importe_cent FROM cobrado LIMIT 1) AS total_acumulado_cent;",
+        "options": {}
+      },
+      "id": "wf06-registrar",
+      "name": "Registrar cobro",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        440,
+        0
+      ],
+      "notes": "Idempotente por event_id: Stripe reintenta.",
+      "notesInFlow": true
+    }
+  ],
+  "connections": {
+    "Webhook de Stripe": {
+      "main": [
+        [
+          {
+            "node": "Verificar firma",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Verificar firma": {
+      "main": [
+        [
+          {
+            "node": "Registrar cobro",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {},
+  "meta": {
+    "templateCredsSetupCompleted": false
+  }
+}

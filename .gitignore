@@ -1,10 +1,31 @@
+# --- Credenciales ---
 .env
+.env.*
+!.env.example
 secrets/
+*.pem
+*.key
+id_rsa*
+*.ppk
+
+# --- Datos de leads: personas reales. Nunca al repositorio ---
+# El sistema entero existe para ingerir Excels de alumnos, y nada impedia que
+# un `git add .` en la raiz subiera una lista real de contactos.
+*.xlsx
+*.xls
+*.csv
+*.tsv
+
+# --- Volumenes y copias ---
 volumes/
 n8n_data/
 postgres_data/
 system_backups/
+backups/
 *.log
 *.sql
 *.tar.gz
+
+# --- Ruido ---
 node_modules/
+.DS_Store

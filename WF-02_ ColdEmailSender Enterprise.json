@@ -534,7 +534,10 @@
           "id": "9YNkmOfiRiSlOmIT",
           "name": "Postgres account 2"
         }
-      }
+      },
+      "disabled": true,
+      "notes": "DESACTIVADO. Nodo de pruebas: borraba la fila de worker_locks en CADA disparo del cron (*/2 9-21 * * 1-5), justo ANTES de Acquire Persistent Lock. Como el lock se adquiere con ON CONFLICT ... WHERE heartbeat_at < NOW() - INTERVAL '2 minutes', al borrar la fila el conflicto nunca se daba y TODO worker obtenia el lock: la exclusion mutua quedaba anulada y dos workers podian enviar a la vez. Ademas reponia a 'queued' la direccion de prueba cada 2 minutos, que son 390 envios al dia a la misma persona. Reactivar solo a mano para re-testear, y volver a desactivar despues.",
+      "notesInFlow": true
     }
   ],
   "pinData": {},

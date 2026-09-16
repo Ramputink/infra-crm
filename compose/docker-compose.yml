@@ -70,6 +70,11 @@ services:
       - "443:443"
     environment:
       - DOMAIN_N8N=${DOMAIN_N8N}
+      # Autenticacion de los formularios de n8n. Ver el bloque @formularios
+      # del Caddyfile: el hash se genera con `caddy hash-password` y en el
+      # .env va con los `$$` duplicados.
+      - FORM_USER=${FORM_USER}
+      - FORM_PASSWORD_HASH=${FORM_PASSWORD_HASH}
     volumes:
       - /opt/automatizacion_crm/compose/Caddyfile:/etc/caddy/Caddyfile:ro
       - /opt/automatizacion_crm/volumes/caddy_data:/data

@@ -1,5 +1,5 @@
 {
-  "name": "WF-05: Secuencia",
+  "name": "WF-05: Secuencia (estado; el envio lo hace enviar_secuencia.py)",
   "nodes": [
     {
       "parameters": {
@@ -81,7 +81,10 @@
       "position": [
         660,
         100
-      ]
+      ],
+      "disabled": true,
+      "notes": "DESACTIVADO. Lo hace enviar_secuencia.py, en Python. WF-05 no tenia nodo de envio: agendaba los toques y los avanzaba sin mandar nada. Anadirle un emailSend habria obligado a reconstruir en JavaScript el guardarrail de la tasa, el pie del art. 14 RGPD, la baja del art. 21.2 LSSI, las cabeceras List-Unsubscribe y los textos en cinco idiomas, que ya existen en Python y costaron varios arreglos. Dos copias de eso se separan seguro. Para que no haya dos sistemas escribiendo el mismo estado, el ciclo entero vive alli y estos nodos quedan apagados.",
+      "notesInFlow": true
     },
     {
       "parameters": {
@@ -97,8 +100,9 @@
         880,
         220
       ],
-      "notes": "Paso 2. WhatsApp Cloud API sigue pendiente: se deja tarea en cola en vez de bloquear.",
-      "notesInFlow": true
+      "notes": "DESACTIVADO. Lo hace enviar_secuencia.py, en Python. WF-05 no tenia nodo de envio: agendaba los toques y los avanzaba sin mandar nada. Anadirle un emailSend habria obligado a reconstruir en JavaScript el guardarrail de la tasa, el pie del art. 14 RGPD, la baja del art. 21.2 LSSI, las cabeceras List-Unsubscribe y los textos en cinco idiomas, que ya existen en Python y costaron varios arreglos. Dos copias de eso se separan seguro. Para que no haya dos sistemas escribiendo el mismo estado, el ciclo entero vive alli y estos nodos quedan apagados.",
+      "notesInFlow": true,
+      "disabled": true
     },
     {
       "parameters": {
@@ -114,8 +118,9 @@
         1100,
         100
       ],
-      "notes": "Al final. Si el envio fallo, el paso no avanza y el lead reaparece manana.",
-      "notesInFlow": true
+      "notes": "DESACTIVADO. Lo hace enviar_secuencia.py, en Python. WF-05 no tenia nodo de envio: agendaba los toques y los avanzaba sin mandar nada. Anadirle un emailSend habria obligado a reconstruir en JavaScript el guardarrail de la tasa, el pie del art. 14 RGPD, la baja del art. 21.2 LSSI, las cabeceras List-Unsubscribe y los textos en cinco idiomas, que ya existen en Python y costaron varios arreglos. Dos copias de eso se separan seguro. Para que no haya dos sistemas escribiendo el mismo estado, el ciclo entero vive alli y estos nodos quedan apagados.",
+      "notesInFlow": true,
+      "disabled": true
     }
   ],
   "connections": {

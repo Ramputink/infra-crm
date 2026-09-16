@@ -77,6 +77,9 @@ services:
       - FORM_PASSWORD_HASH=${FORM_PASSWORD_HASH}
     volumes:
       - /opt/automatizacion_crm/compose/Caddyfile:/etc/caddy/Caddyfile:ro
+      # El panel es HTML estatico servido por el propio Caddy: sin build, sin
+      # contenedor extra y detras del mismo basic_auth.
+      - /opt/automatizacion_crm/panel:/srv/panel:ro
       - /opt/automatizacion_crm/volumes/caddy_data:/data
       - /opt/automatizacion_crm/volumes/caddy_config:/config
     networks:

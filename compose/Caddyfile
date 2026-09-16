@@ -31,7 +31,11 @@
   # NO ARRANCA. Es deliberado: para un control de seguridad, mejor caido que
   # abierto. Si n8n deja de responder tras desplegar esto, mira el .env antes
   # que ninguna otra cosa.
-  @formularios path /form/* /form-test/* /form-waiting/*
+  # El panel y su API van detras de la MISMA autenticacion: los KPIs son PII
+  # agregada -- cuanta gente, de donde y cuanto paga -- y no pueden quedar
+  # abiertos. Al compartir origen, el navegador manda la credencial sola y no
+  # hace falta ningun token en el bundle.
+  @formularios path /form/* /form-test/* /form-waiting/* /panel* /webhook/panel-kpis
   basic_auth @formularios {
     {$FORM_USER} {$FORM_PASSWORD_HASH}
   }
@@ -45,6 +49,12 @@
     Strict-Transport-Security "max-age=31536000; includeSubDomains"
     X-Robots-Tag "noindex, nofollow"
     -Server
+  }
+
+  # El panel es estatico y se sirve desde disco; el resto va a n8n.
+  handle_path /panel* {
+    root * /srv/panel
+    file_server
   }
 
   reverse_proxy n8n:5678

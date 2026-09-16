@@ -1,0 +1,61 @@
+{
+  "name": "WF-08: API del panel",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "GET",
+        "path": "panel-kpis",
+        "responseMode": "lastNode",
+        "options": {}
+      },
+      "id": "wf08-webhook",
+      "name": "GET /panel-kpis",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        0
+      ],
+      "webhookId": "PENDIENTE-GENERAR-AL-IMPORTAR",
+      "notes": "Detras del basic_auth de Caddy, igual que los formularios. Estos datos son PII agregada: cuanta gente, de donde y cuanto paga. No puede quedar abierto.",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- Todo lo que pinta el panel, en UNA consulta.\n--\n-- Una sola ida y vuelta en vez de siete: el panel se abre entero o no se abre,\n-- y no hay forma de que una tarjeta muestre datos de un momento y la de al\n-- lado de otro.\nSELECT jsonb_build_object(\n  'generado_at', NOW(),\n\n  'embudo', (\n    SELECT COALESCE(jsonb_object_agg(embudo, n), '{}'::jsonb)\n    FROM (SELECT COALESCE(embudo,'sin_segmentar') AS embudo, count(*) AS n\n          FROM leads GROUP BY 1) t\n  ),\n\n  'secuencia', (\n    SELECT COALESCE(jsonb_object_agg(paso::text, n), '{}'::jsonb)\n    FROM (SELECT secuencia_paso AS paso, count(*) AS n\n          FROM leads WHERE secuencia_proximo_at IS NOT NULL GROUP BY 1) t\n  ),\n\n  -- Respuestas y bajas: lo que mide si la secuencia molesta o funciona.\n  'reacciones', jsonb_build_object(\n    'contestaron',  (SELECT count(*) FROM leads WHERE replied_at IS NOT NULL),\n    'bajas',        (SELECT count(*) FROM leads WHERE unsubscribed_at IS NOT NULL),\n    'no_respuesta', (SELECT count(*) FROM leads WHERE email_status = 'no_respuesta'),\n    'clientes',     (SELECT count(*) FROM leads WHERE pagado_at IS NOT NULL)\n  ),\n\n  -- A/B de las guias. La columna que importa es `pagaron`, no los clics: saber\n  -- que variante gusta no sirve de nada si no se sabe cual vende.\n  'ab_guias', (\n    SELECT COALESCE(jsonb_agg(jsonb_build_object(\n             'variante', variante, 'leads', leads, 'pagaron', pagaron)), '[]'::jsonb)\n    FROM (SELECT variante_guia AS variante, count(*) AS leads,\n                 count(*) FILTER (WHERE pagado_at IS NOT NULL) AS pagaron\n          FROM leads WHERE variante_guia IS NOT NULL GROUP BY 1 ORDER BY 1) t\n  ),\n\n  'ingresos', jsonb_build_object(\n    'total_eur', COALESCE((SELECT sum(importe_cent) FROM stripe_eventos), 0) / 100.0,\n    'mes_eur',   COALESCE((SELECT sum(importe_cent) FROM stripe_eventos\n                           WHERE recibido_at >= date_trunc('month', NOW())), 0) / 100.0,\n    'por_producto', (\n      SELECT COALESCE(jsonb_object_agg(producto, n), '{}'::jsonb)\n      FROM (SELECT producto, count(*) AS n FROM leads\n            WHERE pagado_at IS NOT NULL AND producto IS NOT NULL GROUP BY 1) t\n    )\n  ),\n\n  'whatsapp', (\n    SELECT COALESCE(jsonb_object_agg(estado, n), '{}'::jsonb)\n    FROM (SELECT estado, count(*) AS n FROM tareas_whatsapp GROUP BY 1) t\n  ),\n\n  'idiomas', (\n    SELECT COALESCE(jsonb_object_agg(idioma, n), '{}'::jsonb)\n    FROM (SELECT COALESCE(idioma_comunicacion,'sin_idioma') AS idioma, count(*) AS n\n          FROM leads GROUP BY 1) t\n  )\n) AS panel;",
+        "options": {}
+      },
+      "id": "wf08-kpis",
+      "name": "KPIs",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        220,
+        0
+      ],
+      "notes": "Una sola consulta: el panel se abre entero o no se abre.",
+      "notesInFlow": true
+    }
+  ],
+  "connections": {
+    "GET /panel-kpis": {
+      "main": [
+        [
+          {
+            "node": "KPIs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {},
+  "meta": {
+    "templateCredsSetupCompleted": false
+  }
+}
